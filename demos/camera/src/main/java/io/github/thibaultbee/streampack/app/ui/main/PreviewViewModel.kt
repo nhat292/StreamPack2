@@ -20,6 +20,7 @@ import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory
 import android.hardware.camera2.CaptureResult
 import android.util.Log
 import android.util.Range
@@ -164,6 +165,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 } else {
                     Log.i(TAG, "Video source is disabled")
                 }
+
+                // Apply text overlay — visible on both preview and the live stream.
+                streamer.videoInput?.processor?.setOverlayBitmap(
+                    TextOverlayBitmapFactory.create("Hello to live streaming platform")
+                )
 
                 // TODO: cancel jobs linked to previous streamer
                 viewModelScope.launch {

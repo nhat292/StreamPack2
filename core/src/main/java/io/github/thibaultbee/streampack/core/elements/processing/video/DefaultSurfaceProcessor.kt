@@ -225,6 +225,13 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    override fun setOverlayBitmap(bitmap: Bitmap?) {
+        if (isReleaseRequested.get()) return
+        // renderer.setOverlayBitmap just stores an AtomicReference, so it is safe to call
+        // from any thread without posting to the GL handler.
+        renderer.setOverlayBitmap(bitmap)
+    }
+
     override fun snapshot(
         @IntRange(from = 0, to = 359) rotationDegrees: Int
     ): ListenableFuture<Bitmap> {

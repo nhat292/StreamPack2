@@ -25,6 +25,8 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLUtils as AndroidGLUtils
+import android.opengl.Matrix
 import android.util.Log
 import android.util.Size
 import android.view.Surface
@@ -38,12 +40,14 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLU
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.PIXEL_STRIDE
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.Program2D
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.SamplerShaderProgram
+import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.VERTEX_BUF
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkEglErrorOrLog
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkEglErrorOrThrow
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkGlErrorOrThrow
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkGlThreadOrThrow
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.checkInitializedOrThrow
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.chooseSurfaceAttrib
+import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.createFloatBuffer
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.createPBufferSurface
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.createPrograms
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.createTexture
@@ -54,12 +58,14 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLU
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.generateTexture
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.getSurfaceSize
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.glVersionNumber
+import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GLUtils.loadShader
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.GraphicDeviceInfo
 import io.github.thibaultbee.streampack.core.elements.processing.video.utils.OutputSurface
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.logger.Logger
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGL10
 
 /**
@@ -87,6 +93,40 @@ class OpenGlRenderer {
     protected var mCurrentInputformat: InputFormat = InputFormat.UNKNOWN
 
     private var mExternalTextureId = -1
+
+    // ── Overlay support ─────────────────────────────────────────────────────
+    /**
+     * Pending bitmap to upload as the overlay texture, or `null` when there is no pending update.
+     * Use [OverlayUpdate] to distinguish "set new bitmap" from "clear overlay".
+     */
+    private val mPendingOverlayUpdate = AtomicReference<OverlayUpdate?>(null)
+
+    /** GL texture id for the overlay (GL_TEXTURE_2D). -1 means no overlay is active. */
+    private var mOverlayTextureId = -1
+    private var mOverlayWidth = 0
+    private var mOverlayHeight = 0
+
+    // Overlay GL program handle and attribute/uniform locations.
+    private var mOverlayProgramHandle = -1
+    private var mOverlayPositionLoc = -1
+    private var mOverlayTexCoordLoc = -1
+    private var mOverlayTransMatrixLoc = -1
+    private var mOverlayTextureLoc = -1
+
+    /**
+     * Y-flipped texture coordinates for 2D bitmaps.
+     * Android Bitmap row 0 (top) maps to GL texture t=0 (bottom), so we flip the t-axis here
+     * to avoid an upside-down overlay.
+     */
+    private val mOverlayTexBuf = createFloatBuffer(
+        floatArrayOf(
+            0.0f, 1.0f,  // vertex 0 (bottom-left screen)  → bitmap top-left
+            1.0f, 1.0f,  // vertex 1 (bottom-right screen) → bitmap top-right
+            0.0f, 0.0f,  // vertex 2 (top-left screen)     → bitmap bottom-left
+            1.0f, 0.0f,  // vertex 3 (top-right screen)    → bitmap bottom-right
+        )
+    )
+    // ── End overlay support ──────────────────────────────────────────────────
 
     /**
      * Initializes the OpenGLRenderer
@@ -144,6 +184,7 @@ class OpenGlRenderer {
             mProgramHandles = createPrograms(dynamicRangeCorrected, shaderOverrides)
             mExternalTextureId = createTexture()
             useAndConfigureProgramWithTexture(mExternalTextureId)
+            initOverlayProgram()
         } catch (e: IllegalStateException) {
             releaseInternal()
             throw e
@@ -155,6 +196,175 @@ class OpenGlRenderer {
         mInitialized.set(true)
         return infoBuilder.build()
     }
+
+    // ── Public overlay API ────────────────────────────────────────────────────
+
+    /**
+     * Sets or clears the overlay bitmap that will be composited over every rendered frame.
+     *
+     * This method is thread-safe and may be called from any thread. The actual texture upload
+     * happens on the GL thread during the next [render] call.
+     *
+     * @param bitmap The bitmap to use as overlay, or `null` to remove the current overlay.
+     */
+    fun setOverlayBitmap(bitmap: Bitmap?) {
+        mPendingOverlayUpdate.set(
+            if (bitmap != null) OverlayUpdate.Set(bitmap) else OverlayUpdate.Clear
+        )
+    }
+
+    // ── Private overlay helpers ───────────────────────────────────────────────
+
+    /**
+     * Compiles and links the overlay GL program.  Must be called on the GL thread during [init].
+     */
+    private fun initOverlayProgram() {
+        val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, OVERLAY_VERTEX_SHADER)
+        val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, OVERLAY_FRAGMENT_SHADER)
+
+        val program = GLES20.glCreateProgram()
+        checkGlErrorOrThrow("glCreateProgram (overlay)")
+        GLES20.glAttachShader(program, vertexShader)
+        GLES20.glAttachShader(program, fragmentShader)
+        GLES20.glLinkProgram(program)
+
+        val linkStatus = IntArray(1)
+        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linkStatus, 0)
+        check(linkStatus[0] == GLES20.GL_TRUE) {
+            "Could not link overlay program: " + GLES20.glGetProgramInfoLog(program)
+        }
+
+        // Shaders are no longer needed once linked.
+        GLES20.glDeleteShader(vertexShader)
+        GLES20.glDeleteShader(fragmentShader)
+
+        mOverlayProgramHandle = program
+        mOverlayPositionLoc = GLES20.glGetAttribLocation(program, "aPosition")
+        mOverlayTexCoordLoc = GLES20.glGetAttribLocation(program, "aTexCoord")
+        mOverlayTransMatrixLoc = GLES20.glGetUniformLocation(program, "uTransMatrix")
+        mOverlayTextureLoc = GLES20.glGetUniformLocation(program, "uTexture")
+    }
+
+    /**
+     * Checks for a pending overlay update and draws the overlay on top of the current frame.
+     * Must be called on the GL thread, inside [render], after the main draw call.
+     *
+     * @param outputSurface The current output surface (used to compute position in clip space).
+     */
+    private fun renderOverlay(outputSurface: OutputSurface) {
+        // Apply any pending overlay update.
+        val update = mPendingOverlayUpdate.getAndSet(null)
+        when (update) {
+            is OverlayUpdate.Set -> uploadOverlayBitmap(update.bitmap)
+            is OverlayUpdate.Clear -> releaseOverlayTexture()
+            null -> { /* no pending change */ }
+        }
+
+        if (mOverlayTextureId == -1) return  // No overlay active.
+
+        val surfaceW = outputSurface.viewPortRect.width().toFloat()
+        val surfaceH = outputSurface.viewPortRect.height().toFloat()
+        if (surfaceW <= 0f || surfaceH <= 0f) return
+
+        // --- Enable alpha blending ---
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+
+        // --- Switch to the overlay program ---
+        GLES20.glUseProgram(mOverlayProgramHandle)
+        checkGlErrorOrThrow("glUseProgram (overlay)")
+
+        // Bind the overlay texture to unit 1.
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mOverlayTextureId)
+        GLES20.glUniform1i(mOverlayTextureLoc, 1)
+
+        // Build the transform matrix that positions the overlay at the top-left corner.
+        //
+        // The quad vertices span the full clip space (-1..1 × -1..1). We scale and translate
+        // so only the overlay-sized region at the top-left is drawn:
+        //   scaleX = overlayWidth  / surfaceWidth   (fraction of screen width)
+        //   scaleY = overlayHeight / surfaceHeight  (fraction of screen height)
+        //   tx     = -1 + scaleX   (shift right so left edge stays at x = -1)
+        //   ty     =  1 - scaleY   (shift down  so top  edge stays at y =  1)
+        val scaleX = mOverlayWidth / surfaceW
+        val scaleY = mOverlayHeight / surfaceH
+        val overlayMatrix = FloatArray(16)
+        Matrix.setIdentityM(overlayMatrix, 0)
+        overlayMatrix[0] = scaleX          // M[0][0]
+        overlayMatrix[5] = scaleY          // M[1][1]
+        overlayMatrix[12] = -1f + scaleX  // tx
+        overlayMatrix[13] = 1f - scaleY   // ty
+        GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, overlayMatrix, 0)
+
+        // Upload vertex positions (reuse the existing full-screen quad buffer).
+        GLES20.glEnableVertexAttribArray(mOverlayPositionLoc)
+        GLES20.glVertexAttribPointer(
+            mOverlayPositionLoc, 2, GLES20.GL_FLOAT, false, 0, VERTEX_BUF
+        )
+
+        // Upload Y-flipped texture coordinates for the 2D bitmap.
+        GLES20.glEnableVertexAttribArray(mOverlayTexCoordLoc)
+        GLES20.glVertexAttribPointer(
+            mOverlayTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, mOverlayTexBuf
+        )
+
+        // Draw the overlay quad.
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        checkGlErrorOrThrow("glDrawArrays (overlay)")
+
+        // --- Restore state for the next surface ---
+        GLES20.glDisableVertexAttribArray(mOverlayPositionLoc)
+        GLES20.glDisableVertexAttribArray(mOverlayTexCoordLoc)
+        GLES20.glDisable(GLES20.GL_BLEND)
+
+        // Restore the main camera texture on unit 0 and re-activate the main program.
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        activateExternalTexture(mExternalTextureId)
+        mCurrentProgram?.use()
+    }
+
+    /**
+     * Uploads [bitmap] to the overlay GL_TEXTURE_2D texture (creating it if necessary).
+     * Must be called on the GL thread.
+     */
+    private fun uploadOverlayBitmap(bitmap: Bitmap) {
+        if (mOverlayTextureId == -1) {
+            val textures = IntArray(1)
+            GLES20.glGenTextures(1, textures, 0)
+            mOverlayTextureId = textures[0]
+        }
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mOverlayTextureId)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+        // Upload the Android Bitmap directly. AndroidGLUtils handles format conversion.
+        AndroidGLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+        checkGlErrorOrThrow("texImage2D (overlay)")
+
+        mOverlayWidth = bitmap.width
+        mOverlayHeight = bitmap.height
+
+        // Restore main texture state.
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        activateExternalTexture(mExternalTextureId)
+    }
+
+    /** Deletes the overlay texture and resets related state. Must be called on the GL thread. */
+    private fun releaseOverlayTexture() {
+        if (mOverlayTextureId != -1) {
+            GLES20.glDeleteTextures(1, intArrayOf(mOverlayTextureId), 0)
+            mOverlayTextureId = -1
+            mOverlayWidth = 0
+            mOverlayHeight = 0
+        }
+    }
+
+    // ── End overlay helpers ───────────────────────────────────────────────────
 
     /**
      * Releases the OpenGLRenderer
@@ -298,6 +508,9 @@ class OpenGlRenderer {
         // Draw the rect.
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP,  /*firstVertex=*/0,  /*vertexCount=*/4)
         checkGlErrorOrThrow("glDrawArrays")
+
+        // Draw text/image overlay (if any) on top of the frame.
+        renderOverlay(outputSurface)
 
         // Set timestamp
         EGLExt.eglPresentationTimeANDROID(mEglDisplay, outputSurface.eglSurface, timestampNs)
@@ -551,6 +764,14 @@ class OpenGlRenderer {
     }
 
     private fun releaseInternal() {
+        // Delete overlay resources.
+        releaseOverlayTexture()
+        if (mOverlayProgramHandle != -1) {
+            GLES20.glDeleteProgram(mOverlayProgramHandle)
+            mOverlayProgramHandle = -1
+        }
+        mPendingOverlayUpdate.set(null)
+
         // Delete program
         for (program in mProgramHandles.values) {
             program.delete()
@@ -651,5 +872,44 @@ class OpenGlRenderer {
 
     companion object {
         private const val TAG = "OpenGlRenderer"
+
+        // ── Overlay shaders ─────────────────────────────────────────────────
+        /**
+         * Simple vertex shader for the 2D overlay quad.
+         * Reuses the same full-screen vertex positions as the main pipeline; the [uTransMatrix]
+         * uniform repositions and scales the quad to the desired overlay region.
+         */
+        private val OVERLAY_VERTEX_SHADER = """
+            uniform mat4 uTransMatrix;
+            attribute vec4 aPosition;
+            attribute vec2 aTexCoord;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_Position = uTransMatrix * aPosition;
+                vTexCoord = aTexCoord;
+            }
+        """.trimIndent()
+
+        /**
+         * Fragment shader that samples the overlay texture and outputs the colour with full alpha
+         * support so transparent regions of the bitmap remain transparent.
+         */
+        private val OVERLAY_FRAGMENT_SHADER = """
+            precision mediump float;
+            uniform sampler2D uTexture;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_FragColor = texture2D(uTexture, vTexCoord);
+            }
+        """.trimIndent()
+        // ── End overlay shaders ─────────────────────────────────────────────
+    }
+
+    /** Represents a pending change to the overlay texture, consumed on the GL thread. */
+    private sealed class OverlayUpdate {
+        /** Upload [bitmap] as the new overlay texture. */
+        data class Set(val bitmap: Bitmap) : OverlayUpdate()
+        /** Remove the current overlay texture. */
+        object Clear : OverlayUpdate()
     }
 }

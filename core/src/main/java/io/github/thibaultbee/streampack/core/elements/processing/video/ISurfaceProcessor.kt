@@ -26,6 +26,8 @@ import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRang
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 
+
+
 interface ISurfaceProcessor
 
 /**
@@ -52,6 +54,23 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
     fun removeAllOutputSurfaces()
 
     fun snapshot(@IntRange(from = 0, to = 359) rotationDegrees: Int): ListenableFuture<Bitmap>
+
+    /**
+     * Sets or clears a bitmap that will be composited over the top-left corner of every rendered
+     * frame.  Pass `null` to remove a previously set overlay.
+     *
+     * This call is thread-safe; the actual texture upload happens on the GL thread.
+     *
+     * Example – render a text label using [io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory]:
+     * ```kotlin
+     * val overlay = TextOverlayBitmapFactory.create("Hello to live streaming platform")
+     * streamer.videoInput.processor.setOverlayBitmap(overlay)
+     * ```
+     *
+     * Default implementation is a no-op so existing [ISurfaceProcessorInternal] implementations
+     * are not broken.
+     */
+    fun setOverlayBitmap(bitmap: Bitmap?) { /* no-op by default */ }
 
     /**
      * Factory interface for creating instances of [ISurfaceProcessorInternal].
