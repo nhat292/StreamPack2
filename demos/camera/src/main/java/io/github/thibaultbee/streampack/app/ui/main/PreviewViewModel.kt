@@ -168,7 +168,14 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
                 // Apply text overlay — visible on both preview and the live stream.
                 streamer.videoInput?.processor?.setOverlayBitmap(
-                    TextOverlayBitmapFactory.create("Hello to live streaming platform")
+                    TextOverlayBitmapFactory.create(
+                        text3 = "Champions League – Group A",
+                        text1 = "Real Madrid",
+                        score1 = "6", matchScore1 = "1", turn1 = "serving",
+                        text2 = "Barcelona",
+                        score2 = "4", matchScore2 = "0",
+                        tickerText = "🔥 Welcome to the Live Stream • Subscribe & Like",
+                    )
                 )
 
                 // TODO: cancel jobs linked to previous streamer
