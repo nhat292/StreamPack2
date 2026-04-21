@@ -232,6 +232,11 @@ private class DefaultSurfaceProcessor(
         renderer.setOverlayBitmap(bitmap)
     }
 
+    override fun setTickerBitmap(bitmap: Bitmap?) {
+        if (isReleaseRequested.get()) return
+        renderer.setTickerBitmap(bitmap)
+    }
+
     override fun snapshot(
         @IntRange(from = 0, to = 359) rotationDegrees: Int
     ): ListenableFuture<Bitmap> {

@@ -73,6 +73,14 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
     fun setOverlayBitmap(bitmap: Bitmap?) { /* no-op by default */ }
 
     /**
+     * Sets or clears the ticker bitmap that will be animated (scrolled right-to-left) at the
+     * bottom of every rendered frame.  Pass `null` to stop the ticker.
+     *
+     * This call is thread-safe; the actual texture upload happens on the GL thread.
+     */
+    fun setTickerBitmap(bitmap: Bitmap?) { /* no-op by default */ }
+
+    /**
      * Factory interface for creating instances of [ISurfaceProcessorInternal].
      */
     interface Factory {
