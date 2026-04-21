@@ -113,6 +113,15 @@ class OpenGlRenderer {
     private var mOverlayTransMatrixLoc = -1
     private var mOverlayTextureLoc = -1
 
+    // ── Ticker support ──────────────────────────────────────────────────────
+    private val mPendingTickerUpdate = AtomicReference<OverlayUpdate?>(null)
+    private var mTickerTextureId = -1
+    private var mTickerWidth = 0
+    private var mTickerHeight = 0
+    /** Current horizontal center of the ticker in clip space; starts off-screen right. */
+    private var mTickerX = TICKER_START_X
+    // ── End ticker support ──────────────────────────────────────────────────
+
     /**
      * Y-flipped texture coordinates for 2D bitmaps.
      * Android Bitmap row 0 (top) maps to GL texture t=0 (bottom), so we flip the t-axis here
@@ -213,6 +222,18 @@ class OpenGlRenderer {
         )
     }
 
+    /**
+     * Sets or clears the ticker bitmap that will be scrolled right-to-left across the bottom
+     * of every rendered frame.
+     *
+     * This method is thread-safe and may be called from any thread.
+     */
+    fun setTickerBitmap(bitmap: Bitmap?) {
+        mPendingTickerUpdate.set(
+            if (bitmap != null) OverlayUpdate.Set(bitmap) else OverlayUpdate.Clear
+        )
+    }
+
     // ── Private overlay helpers ───────────────────────────────────────────────
 
     /**
@@ -246,121 +267,155 @@ class OpenGlRenderer {
     }
 
     /**
-     * Checks for a pending overlay update and draws the overlay on top of the current frame.
+     * Checks for pending overlay/ticker updates, draws the static scoreboard overlay at the
+     * top-left and animates the ticker (right-to-left) at the bottom.
      * Must be called on the GL thread, inside [render], after the main draw call.
-     *
-     * @param outputSurface The current output surface (used to compute position in clip space).
      */
     private fun renderOverlay(outputSurface: OutputSurface) {
-        // Apply any pending overlay update.
-        val update = mPendingOverlayUpdate.getAndSet(null)
-        when (update) {
-            is OverlayUpdate.Set -> uploadOverlayBitmap(update.bitmap)
+        // Apply any pending updates (safe to do before enabling blend).
+        val overlayUpdate = mPendingOverlayUpdate.getAndSet(null)
+        when (overlayUpdate) {
+            is OverlayUpdate.Set -> uploadOverlayBitmap(update = overlayUpdate, ticker = false)
             is OverlayUpdate.Clear -> releaseOverlayTexture()
-            null -> { /* no pending change */ }
+            null -> {}
+        }
+        val tickerUpdate = mPendingTickerUpdate.getAndSet(null)
+        when (tickerUpdate) {
+            is OverlayUpdate.Set -> {
+                uploadOverlayBitmap(update = tickerUpdate, ticker = true)
+                mTickerX = TICKER_START_X
+            }
+            is OverlayUpdate.Clear -> releaseTickerTexture()
+            null -> {}
         }
 
-        if (mOverlayTextureId == -1) return  // No overlay active.
+        val hasOverlay = mOverlayTextureId != -1
+        val hasTicker = mTickerTextureId != -1
+        if (!hasOverlay && !hasTicker) return
 
         val surfaceW = outputSurface.viewPortRect.width().toFloat()
         val surfaceH = outputSurface.viewPortRect.height().toFloat()
         if (surfaceW <= 0f || surfaceH <= 0f) return
 
-        // --- Enable alpha blending ---
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        // Everything from glEnable onwards is inside try-finally so GL state
+        // (blend, vertex arrays, program, active texture) is ALWAYS restored even
+        // when a setup or draw call fails.  Leaving GL_BLEND enabled for the next
+        // camera frame would corrupt encoded output and eventually kill the RTMP stream.
+        try {
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glUseProgram(mOverlayProgramHandle)
 
-        // --- Switch to the overlay program ---
-        GLES20.glUseProgram(mOverlayProgramHandle)
-        checkGlErrorOrThrow("glUseProgram (overlay)")
+            // Vertex / tex-coord pointers are the same for both draws; configure once.
+            GLES20.glEnableVertexAttribArray(mOverlayPositionLoc)
+            GLES20.glVertexAttribPointer(mOverlayPositionLoc, 2, GLES20.GL_FLOAT, false, 0, VERTEX_BUF)
+            GLES20.glEnableVertexAttribArray(mOverlayTexCoordLoc)
+            GLES20.glVertexAttribPointer(mOverlayTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, mOverlayTexBuf)
+            // ── 1. Static scoreboard overlay (top-left with margin) ─────────
+            if (hasOverlay) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mOverlayTextureId)
+                GLES20.glUniform1i(mOverlayTextureLoc, 1)
 
-        // Bind the overlay texture to unit 1.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mOverlayTextureId)
-        GLES20.glUniform1i(mOverlayTextureLoc, 1)
+                val scaleX = mOverlayWidth / surfaceW
+                val scaleY = mOverlayHeight / surfaceH
+                // OVERLAY_MARGIN_PX pixels inset from top-left corner.
+                // Clip space spans 2 units (-1..1), so 1 pixel = 2/surfaceN clip units.
+                val marginX = OVERLAY_MARGIN_PX * 2f / surfaceW
+                val marginY = OVERLAY_MARGIN_PX * 2f / surfaceH
 
-        // Build the transform matrix that positions the overlay at the top-left corner.
-        //
-        // The quad vertices span the full clip space (-1..1 × -1..1). We scale and translate
-        // so only the overlay-sized region at the top-left is drawn:
-        //   scaleX = overlayWidth  / surfaceWidth   (fraction of screen width)
-        //   scaleY = overlayHeight / surfaceHeight  (fraction of screen height)
-        //   tx     = -1 + scaleX   (shift right so left edge stays at x = -1)
-        //   ty     =  1 - scaleY   (shift down  so top  edge stays at y =  1)
-        val scaleX = mOverlayWidth / surfaceW
-        val scaleY = mOverlayHeight / surfaceH
-        val overlayMatrix = FloatArray(16)
-        Matrix.setIdentityM(overlayMatrix, 0)
-        overlayMatrix[0] = scaleX          // M[0][0]
-        overlayMatrix[5] = scaleY          // M[1][1]
-        overlayMatrix[12] = -1f + scaleX  // tx
-        overlayMatrix[13] = 1f - scaleY   // ty
-        GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, overlayMatrix, 0)
+                val m = FloatArray(16)
+                Matrix.setIdentityM(m, 0)
+                m[0]  = scaleX
+                m[5]  = scaleY
+                m[12] = -1f + scaleX + marginX
+                m[13] =  1f - scaleY - marginY
+                GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
 
-        // Upload vertex positions (reuse the existing full-screen quad buffer).
-        GLES20.glEnableVertexAttribArray(mOverlayPositionLoc)
-        GLES20.glVertexAttribPointer(
-            mOverlayPositionLoc, 2, GLES20.GL_FLOAT, false, 0, VERTEX_BUF
-        )
+            // ── 2. Ticker — scrolls right-to-left at the bottom each frame ──
+            if (hasTicker && mTickerHeight > 0) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTickerTextureId)
+                GLES20.glUniform1i(mOverlayTextureLoc, 2)
 
-        // Upload Y-flipped texture coordinates for the 2D bitmap.
-        GLES20.glEnableVertexAttribArray(mOverlayTexCoordLoc)
-        GLES20.glVertexAttribPointer(
-            mOverlayTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, mOverlayTexBuf
-        )
+                val tickerScaleY = mTickerHeight.toFloat() / surfaceH
+                val tickerScaleX = tickerScaleY * (mTickerWidth.toFloat() / mTickerHeight.toFloat())
 
-        // Draw the overlay quad.
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        checkGlErrorOrThrow("glDrawArrays (overlay)")
+                mTickerX -= TICKER_SPEED
+                if (mTickerX < -1f - tickerScaleX) mTickerX = 1f + tickerScaleX
 
-        // --- Restore state for the next surface ---
-        GLES20.glDisableVertexAttribArray(mOverlayPositionLoc)
-        GLES20.glDisableVertexAttribArray(mOverlayTexCoordLoc)
-        GLES20.glDisable(GLES20.GL_BLEND)
-
-        // Restore the main camera texture on unit 0 and re-activate the main program.
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        activateExternalTexture(mExternalTextureId)
-        mCurrentProgram?.use()
+                val m = FloatArray(16)
+                Matrix.setIdentityM(m, 0)
+                m[0]  = tickerScaleX
+                m[5]  = tickerScaleY
+                m[12] = mTickerX
+                m[13] = TICKER_Y
+                GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
+        } finally {
+            // Always restore GL state so the camera frame rendering is unaffected.
+            GLES20.glDisableVertexAttribArray(mOverlayPositionLoc)
+            GLES20.glDisableVertexAttribArray(mOverlayTexCoordLoc)
+            GLES20.glDisable(GLES20.GL_BLEND)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            activateExternalTexture(mExternalTextureId)
+            mCurrentProgram?.use()
+        }
     }
 
     /**
-     * Uploads [bitmap] to the overlay GL_TEXTURE_2D texture (creating it if necessary).
+     * Uploads [update]'s bitmap to a GL_TEXTURE_2D texture (creating it if necessary).
+     * [ticker] = false  → scoreboard overlay (unit 1)
+     * [ticker] = true   → ticker (unit 2)
      * Must be called on the GL thread.
      */
-    private fun uploadOverlayBitmap(bitmap: Bitmap) {
-        if (mOverlayTextureId == -1) {
-            val textures = IntArray(1)
-            GLES20.glGenTextures(1, textures, 0)
-            mOverlayTextureId = textures[0]
+    private fun uploadOverlayBitmap(update: OverlayUpdate.Set, ticker: Boolean) {
+        val bitmap = update.bitmap
+        val unit = if (ticker) GLES20.GL_TEXTURE2 else GLES20.GL_TEXTURE1
+
+        if (ticker) {
+            if (mTickerTextureId == -1) {
+                val t = IntArray(1); GLES20.glGenTextures(1, t, 0); mTickerTextureId = t[0]
+            }
+        } else {
+            if (mOverlayTextureId == -1) {
+                val t = IntArray(1); GLES20.glGenTextures(1, t, 0); mOverlayTextureId = t[0]
+            }
         }
 
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mOverlayTextureId)
+        val texId = if (ticker) mTickerTextureId else mOverlayTextureId
+        GLES20.glActiveTexture(unit)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-
-        // Upload the Android Bitmap directly. AndroidGLUtils handles format conversion.
         AndroidGLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
-        checkGlErrorOrThrow("texImage2D (overlay)")
+        checkGlErrorOrThrow("texImage2D (${if (ticker) "ticker" else "overlay"})")
 
-        mOverlayWidth = bitmap.width
-        mOverlayHeight = bitmap.height
+        if (ticker) { mTickerWidth = bitmap.width; mTickerHeight = bitmap.height }
+        else        { mOverlayWidth = bitmap.width; mOverlayHeight = bitmap.height }
 
-        // Restore main texture state.
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         activateExternalTexture(mExternalTextureId)
     }
 
-    /** Deletes the overlay texture and resets related state. Must be called on the GL thread. */
+    /** Deletes the scoreboard overlay texture. Must be called on the GL thread. */
     private fun releaseOverlayTexture() {
         if (mOverlayTextureId != -1) {
             GLES20.glDeleteTextures(1, intArrayOf(mOverlayTextureId), 0)
-            mOverlayTextureId = -1
-            mOverlayWidth = 0
-            mOverlayHeight = 0
+            mOverlayTextureId = -1; mOverlayWidth = 0; mOverlayHeight = 0
+        }
+    }
+
+    /** Deletes the ticker texture. Must be called on the GL thread. */
+    private fun releaseTickerTexture() {
+        if (mTickerTextureId != -1) {
+            GLES20.glDeleteTextures(1, intArrayOf(mTickerTextureId), 0)
+            mTickerTextureId = -1; mTickerWidth = 0; mTickerHeight = 0
         }
     }
 
@@ -510,7 +565,14 @@ class OpenGlRenderer {
         checkGlErrorOrThrow("glDrawArrays")
 
         // Draw text/image overlay (if any) on top of the frame.
-        renderOverlay(outputSurface)
+        // Wrapped in try-catch so that any GL error in the overlay path never prevents
+        // eglPresentationTimeANDROID / eglSwapBuffers from running — dropped frames would
+        // starve the video encoder and eventually cause the RTMP server to close the connection.
+        try {
+            renderOverlay(outputSurface)
+        } catch (e: Exception) {
+            Logger.e(TAG, "Overlay rendering failed, skipping overlay for this frame", e)
+        }
 
         // Set timestamp
         EGLExt.eglPresentationTimeANDROID(mEglDisplay, outputSurface.eglSurface, timestampNs)
@@ -766,6 +828,8 @@ class OpenGlRenderer {
     private fun releaseInternal() {
         // Delete overlay resources.
         releaseOverlayTexture()
+        releaseTickerTexture()
+        mPendingTickerUpdate.set(null)
         if (mOverlayProgramHandle != -1) {
             GLES20.glDeleteProgram(mOverlayProgramHandle)
             mOverlayProgramHandle = -1
@@ -872,6 +936,16 @@ class OpenGlRenderer {
 
     companion object {
         private const val TAG = "OpenGlRenderer"
+
+        // ── Overlay / ticker constants ──────────────────────────────────────
+        /** Pixel margin from the top-left corner for the scoreboard overlay. */
+        private const val OVERLAY_MARGIN_PX = 16f
+        /** Vertical position of the ticker centre in clip space (near bottom). */
+        private const val TICKER_Y = -0.92f
+        /** Clip-space units the ticker moves left per frame. */
+        private const val TICKER_SPEED = 0.003f
+        /** Initial X position (fully off-screen right) when a new ticker starts. */
+        private const val TICKER_START_X = 1.1f
 
         // ── Overlay shaders ─────────────────────────────────────────────────
         /**

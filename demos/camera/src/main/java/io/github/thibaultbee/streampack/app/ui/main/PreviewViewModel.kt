@@ -166,17 +166,31 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                     Log.i(TAG, "Video source is disabled")
                 }
 
-                // Apply text overlay — visible on both preview and the live stream.
-                streamer.videoInput?.processor?.setOverlayBitmap(
-                    TextOverlayBitmapFactory.create(
-                        text3 = "Champions League – Group A",
-                        text1 = "Real Madrid",
-                        score1 = "6", matchScore1 = "1", turn1 = "serving",
-                        text2 = "Barcelona",
-                        score2 = "4", matchScore2 = "0",
-                        tickerText = "🔥 Welcome to the Live Stream • Subscribe & Like",
-                    )
-                )
+                // Build and apply the text overlay on a background thread.
+                // Running on the main thread risks blocking coroutine collection and
+                // can delay setup of error-monitoring coroutines below.
+                val streamerRef = streamer
+                viewModelScope.launch(Dispatchers.Default) {
+                    try {
+                        // Scoreboard overlay (static, top-left).
+                        val scoreboard = TextOverlayBitmapFactory.create(
+                            text3 = "Champions League – Group A",
+                            text1 = "Real Madrid",
+                            score1 = "6", matchScore1 = "1", turn1 = "serving",
+                            text2 = "Barcelona",
+                            score2 = "4", matchScore2 = "0",
+                        )
+                        streamerRef.videoInput?.processor?.setOverlayBitmap(scoreboard)
+
+                        // Ticker (animated, scrolls right-to-left at the bottom).
+                        val ticker = TextOverlayBitmapFactory.createTickerBitmap(
+                            "🔥 Welcome to the Live Stream • Subscribe & Like"
+                        )
+                        streamerRef.videoInput?.processor?.setTickerBitmap(ticker)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to create or apply overlay bitmap", e)
+                    }
+                }
 
                 // TODO: cancel jobs linked to previous streamer
                 viewModelScope.launch {

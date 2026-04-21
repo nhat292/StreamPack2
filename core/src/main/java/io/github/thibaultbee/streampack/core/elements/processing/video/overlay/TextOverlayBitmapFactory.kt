@@ -45,10 +45,10 @@ import kotlin.math.min
 object TextOverlayBitmapFactory {
 
     // ── Layout constants ──────────────────────────────────────────────────
-    private const val TEXT_SIZE = 30f
-    private const val TEXT3_SIZE = 30f
-    private const val TEXT4_SIZE = 25f
-    private const val TICKER_SIZE = 28f
+    private const val TEXT_SIZE = 18f    // 30 * 0.6 (40 % smaller)
+    private const val TEXT3_SIZE = 18f   // 30 * 0.6
+    private const val TEXT4_SIZE = 15f   // 25 * 0.6
+    private const val TICKER_SIZE = 17f  // 28 * 0.6
     private const val PADDING = 14f
     private const val BORDER_WIDTH = 1f
 
@@ -68,6 +68,10 @@ object TextOverlayBitmapFactory {
     // ── Cache ─────────────────────────────────────────────────────────────
     private var lastParams: OverlayParams? = null
     private var cachedBitmap: Bitmap? = null
+
+    // Ticker bitmap cache (separate from the scoreboard bitmap).
+    private var lastTickerText: String? = null
+    private var cachedTickerBitmap: Bitmap? = null
 
     // ── Public data class ─────────────────────────────────────────────────
 
@@ -140,15 +144,44 @@ object TextOverlayBitmapFactory {
         return cachedBitmap
     }
 
+    /**
+     * Builds a bitmap containing only the ticker text.
+     *
+     * This bitmap should be passed to
+     * `streamer.videoInput.processor.setTickerBitmap()` so the GL renderer can
+     * animate it independently (scrolling right-to-left each frame).
+     *
+     * Returns `null` when [text] is empty.
+     */
+    fun createTickerBitmap(text: String): Bitmap? {
+        if (text.isEmpty()) return null
+        if (text == lastTickerText && cachedTickerBitmap?.isRecycled == false) {
+            return cachedTickerBitmap
+        }
+        val label = measureLabel(text, TICKER_SIZE, Color.WHITE, COLOR_TICKER_BG, 0f)
+        val bitmap = Bitmap.createBitmap(label.w, label.h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawLabel(canvas, label, 0, label.w)
+        cachedTickerBitmap = bitmap
+        lastTickerText = text
+        return bitmap
+    }
+
     // ── Internal model ────────────────────────────────────────────────────
 
-    /** Pre-measured label row (text3, text4, ticker). */
+    /**
+     * Pre-measured label row (text3, text4, ticker).
+     *
+     * [borderWidth] mirrors the `borderWidth` parameter of the reference
+     * `createTextTexture`. Pass 0f for elements with no border (ticker) so the
+     * background extends edge-to-edge and no vertical padding is wasted.
+     */
     private data class LabelSection(
         val text: String,
         val textSize: Float,
         val textColor: Int,
         val bgColor: Int,
-        val border: Boolean,
+        val borderWidth: Float,
         val w: Int,
         val h: Int,
         val glyphTop: Int,  // Paint.getTextBounds top (negative = ascent above baseline)
@@ -203,14 +236,14 @@ object TextOverlayBitmapFactory {
     // ── Measurement helpers ───────────────────────────────────────────────
 
     private fun measureLabel(
-        text: String, textSize: Float, textColor: Int, bgColor: Int, border: Boolean,
+        text: String, textSize: Float, textColor: Int, bgColor: Int, borderWidth: Float,
     ): LabelSection {
         val paint = textPaint(textColor, textSize)
         val b = Rect()
         paint.getTextBounds(text, 0, text.length, b)
-        val w = (b.width() + PADDING * 2 + BORDER_WIDTH * 2).toInt().coerceAtLeast(1)
-        val h = (b.height() + PADDING * 2 + BORDER_WIDTH * 2).toInt().coerceAtLeast(1)
-        return LabelSection(text, textSize, textColor, bgColor, border, w, h, b.top)
+        val w = (b.width() + PADDING * 2 + borderWidth * 2).toInt().coerceAtLeast(1)
+        val h = (b.height() + PADDING * 2 + borderWidth * 2).toInt().coerceAtLeast(1)
+        return LabelSection(text, textSize, textColor, bgColor, borderWidth, w, h, b.top)
     }
 
     private fun sampleColWidth(paint: Paint, sample: String): Float {
@@ -270,23 +303,23 @@ object TextOverlayBitmapFactory {
     // ── Bitmap construction ───────────────────────────────────────────────
 
     private fun buildBitmap(p: OverlayParams): Bitmap? {
-        // Measure optional label sections
+        // Measure optional label sections.
+        // Border widths mirror the reference `createTextTexture` calls:
+        //   text3 → borderWidth = 1f (yellow border, invisible over yellow bg)
+        //   text4 → borderWidth = 1f (yellow border, visible over blue bg)
+        // Note: ticker is animated separately via setTickerBitmap() — not included here.
         val text3 = if (p.text3.isNotEmpty())
-            measureLabel(p.text3, TEXT3_SIZE, COLOR_TEXT3_TEXT, COLOR_TEXT3_BG, border = false)
+            measureLabel(p.text3, TEXT3_SIZE, COLOR_TEXT3_TEXT, COLOR_TEXT3_BG, BORDER_WIDTH)
         else null
 
         val text4 = if (p.text4.isNotEmpty())
-            measureLabel(p.text4, TEXT4_SIZE, Color.WHITE, COLOR_TEXT4_BG, border = true)
-        else null
-
-        val ticker = if (p.tickerText.isNotEmpty())
-            measureLabel(p.tickerText, TICKER_SIZE, Color.WHITE, COLOR_TICKER_BG, border = false)
+            measureLabel(p.text4, TEXT4_SIZE, Color.WHITE, COLOR_TEXT4_BG, BORDER_WIDTH)
         else null
 
         // Shared scoreboard layout (null when neither player row is set)
         val scoreLayout = buildScoreboardLayout(p)
 
-        if (scoreLayout == null && text3 == null && text4 == null && ticker == null) return null
+        if (scoreLayout == null && text3 == null && text4 == null) return null
 
         val scoreboardRowCount =
             (if (p.text1.isNotEmpty()) 1 else 0) + (if (p.text2.isNotEmpty()) 1 else 0)
@@ -296,15 +329,13 @@ object TextOverlayBitmapFactory {
             scoreLayout?.rowWidth ?: 0,
             text3?.w ?: 0,
             text4?.w ?: 0,
-            ticker?.w ?: 0,
         )
         if (canvasWidth <= 0) return null
 
         val canvasHeight =
             (text3?.h ?: 0) +
             (scoreLayout?.rowH ?: 0) * scoreboardRowCount +
-            (text4?.h ?: 0) +
-            (ticker?.h ?: 0)
+            (text4?.h ?: 0)
         if (canvasHeight <= 0) return null
 
         val bitmap = Bitmap.createBitmap(canvasWidth, canvasHeight, Bitmap.Config.ARGB_8888)
@@ -340,12 +371,6 @@ object TextOverlayBitmapFactory {
         // 3. Venue/info row (text4)
         if (text4 != null) {
             drawLabel(canvas, text4, yOffset, canvasWidth)
-            yOffset += text4.h
-        }
-
-        // 4. Ticker bar
-        if (ticker != null) {
-            drawLabel(canvas, ticker, yOffset, canvasWidth)
         }
 
         return bitmap
@@ -356,26 +381,29 @@ object TextOverlayBitmapFactory {
     private fun drawLabel(canvas: Canvas, s: LabelSection, yOffset: Int, canvasWidth: Int) {
         val top = yOffset.toFloat()
         val bottom = top + s.h
+        val bw = s.borderWidth
 
-        // Background stretches to full canvas width
+        // Background — mirrors the reference: inset by borderWidth on all sides.
+        // When borderWidth = 0 the background fills edge-to-edge (ticker).
         canvas.drawRect(
-            BORDER_WIDTH, top + BORDER_WIDTH,
-            canvasWidth - BORDER_WIDTH, bottom - BORDER_WIDTH,
+            bw, top + bw,
+            canvasWidth - bw, bottom - bw,
             fillPaint(s.bgColor),
         )
 
-        if (s.border) {
-            canvas.drawRect(
-                BORDER_WIDTH / 2, top + BORDER_WIDTH / 2,
-                canvasWidth - BORDER_WIDTH / 2, bottom - BORDER_WIDTH / 2,
-                strokePaint(COLOR_BORDER, BORDER_WIDTH),
-            )
-        }
-
         // baseline = yOffset + padding + borderWidth - glyphTop
         // glyphTop is negative so subtracting it adds the ascent distance.
-        val baseline = yOffset + PADDING + BORDER_WIDTH - s.glyphTop
-        canvas.drawText(s.text, PADDING + BORDER_WIDTH, baseline, textPaint(s.textColor, s.textSize))
+        val baseline = yOffset + PADDING + bw - s.glyphTop
+        canvas.drawText(s.text, PADDING + bw, baseline, textPaint(s.textColor, s.textSize))
+
+        // Border drawn last (matches reference draw order).
+        if (bw > 0f) {
+            canvas.drawRect(
+                bw / 2, top + bw / 2,
+                canvasWidth - bw / 2, bottom - bw / 2,
+                strokePaint(COLOR_BORDER, bw),
+            )
+        }
     }
 
     /**
@@ -404,18 +432,12 @@ object TextOverlayBitmapFactory {
         val top = yOffset.toFloat()
         val bottom = top + layout.rowH
 
-        // Background extends to canvasWidth (not just row width) for consistent appearance
+        // Background extends to canvasWidth (not just row width) for consistent appearance.
+        // Matches reference: main background rect is inset by borderWidth on all sides.
         canvas.drawRect(
             BORDER_WIDTH, top + BORDER_WIDTH,
             canvasWidth - BORDER_WIDTH, bottom - BORDER_WIDTH,
             fillPaint(COLOR_PLAYER_BG),
-        )
-
-        // Border
-        canvas.drawRect(
-            BORDER_WIDTH / 2, top + BORDER_WIDTH / 2,
-            canvasWidth - BORDER_WIDTH / 2, bottom - BORDER_WIDTH / 2,
-            strokePaint(COLOR_BORDER, BORDER_WIDTH),
         )
 
         val paint = textPaint(Color.WHITE, TEXT_SIZE)
@@ -502,6 +524,13 @@ object TextOverlayBitmapFactory {
                 )
             }
         }
+
+        // Yellow border drawn last so it sits on top of any column that reaches the edge.
+        canvas.drawRect(
+            BORDER_WIDTH / 2, top + BORDER_WIDTH / 2,
+            canvasWidth - BORDER_WIDTH / 2, bottom - BORDER_WIDTH / 2,
+            strokePaint(COLOR_BORDER, BORDER_WIDTH),
+        )
     }
 
     // ── Paint factories ───────────────────────────────────────────────────
