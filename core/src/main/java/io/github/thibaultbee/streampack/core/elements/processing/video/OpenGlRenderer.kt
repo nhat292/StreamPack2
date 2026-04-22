@@ -96,15 +96,13 @@ class OpenGlRenderer {
 
     // ── Overlay support ─────────────────────────────────────────────────────
     /**
-     * Pending bitmap to upload as the overlay texture, or `null` when there is no pending update.
-     * Use [OverlayUpdate] to distinguish "set new bitmap" from "clear overlay".
+     * Pending list of layer bitmaps to upload, or `null` when there is no pending update.
+     * An empty list means "clear all layers".
      */
-    private val mPendingOverlayUpdate = AtomicReference<OverlayUpdate?>(null)
+    private val mPendingLayersUpdate = AtomicReference<List<Bitmap>?>(null)
 
-    /** GL texture id for the overlay (GL_TEXTURE_2D). -1 means no overlay is active. */
-    private var mOverlayTextureId = -1
-    private var mOverlayWidth = 0
-    private var mOverlayHeight = 0
+    /** Currently active static overlay layers (uploaded GL_TEXTURE_2D textures). */
+    private var mStaticLayers: List<StaticLayer> = emptyList()
 
     // Overlay GL program handle and attribute/uniform locations.
     private var mOverlayProgramHandle = -1
@@ -209,17 +207,22 @@ class OpenGlRenderer {
     // ── Public overlay API ────────────────────────────────────────────────────
 
     /**
-     * Sets or clears the overlay bitmap that will be composited over every rendered frame.
+     * Replaces the static overlay with a list of independently-positioned bitmaps stacked
+     * vertically at the top-left corner. Each bitmap gets its own GL texture unit (units 1–3).
+     * An empty list clears the overlay.
      *
-     * This method is thread-safe and may be called from any thread. The actual texture upload
-     * happens on the GL thread during the next [render] call.
-     *
-     * @param bitmap The bitmap to use as overlay, or `null` to remove the current overlay.
+     * Thread-safe; upload happens on the GL thread during the next [render] call.
+     */
+    fun setOverlayBitmaps(bitmaps: List<Bitmap>) {
+        mPendingLayersUpdate.set(bitmaps)
+    }
+
+    /**
+     * Convenience wrapper: treats [bitmap] as a single overlay layer.
+     * Pass `null` to clear the overlay.
      */
     fun setOverlayBitmap(bitmap: Bitmap?) {
-        mPendingOverlayUpdate.set(
-            if (bitmap != null) OverlayUpdate.Set(bitmap) else OverlayUpdate.Clear
-        )
+        setOverlayBitmaps(listOfNotNull(bitmap))
     }
 
     /**
@@ -267,18 +270,15 @@ class OpenGlRenderer {
     }
 
     /**
-     * Checks for pending overlay/ticker updates, draws the static scoreboard overlay at the
-     * top-left and animates the ticker (right-to-left) at the bottom.
+     * Checks for pending overlay/ticker updates, draws each static layer stacked vertically at
+     * the top-left, then animates the ticker (right-to-left) at the bottom.
      * Must be called on the GL thread, inside [render], after the main draw call.
      */
     private fun renderOverlay(outputSurface: OutputSurface) {
-        // Apply any pending updates (safe to do before enabling blend).
-        val overlayUpdate = mPendingOverlayUpdate.getAndSet(null)
-        when (overlayUpdate) {
-            is OverlayUpdate.Set -> uploadOverlayBitmap(update = overlayUpdate, ticker = false)
-            is OverlayUpdate.Clear -> releaseOverlayTexture()
-            null -> {}
-        }
+        // Apply pending layer list update (empty list = clear all layers).
+        mPendingLayersUpdate.getAndSet(null)?.let { uploadLayerBitmaps(it) }
+
+        // Apply pending ticker update.
         val tickerUpdate = mPendingTickerUpdate.getAndSet(null)
         when (tickerUpdate) {
             is OverlayUpdate.Set -> {
@@ -289,9 +289,9 @@ class OpenGlRenderer {
             null -> {}
         }
 
-        val hasOverlay = mOverlayTextureId != -1
+        val hasLayers = mStaticLayers.isNotEmpty()
         val hasTicker = mTickerTextureId != -1
-        if (!hasOverlay && !hasTicker) return
+        if (!hasLayers && !hasTicker) return
 
         val surfaceW = outputSurface.viewPortRect.width().toFloat()
         val surfaceH = outputSurface.viewPortRect.height().toFloat()
@@ -306,39 +306,47 @@ class OpenGlRenderer {
             GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
             GLES20.glUseProgram(mOverlayProgramHandle)
 
-            // Vertex / tex-coord pointers are the same for both draws; configure once.
+            // Vertex / tex-coord pointers are shared by all draws; configure once.
             GLES20.glEnableVertexAttribArray(mOverlayPositionLoc)
             GLES20.glVertexAttribPointer(mOverlayPositionLoc, 2, GLES20.GL_FLOAT, false, 0, VERTEX_BUF)
             GLES20.glEnableVertexAttribArray(mOverlayTexCoordLoc)
             GLES20.glVertexAttribPointer(mOverlayTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, mOverlayTexBuf)
-            // ── 1. Static scoreboard overlay (top-left with margin) ─────────
-            if (hasOverlay) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mOverlayTextureId)
-                GLES20.glUniform1i(mOverlayTextureLoc, 1)
 
-                val scaleX = mOverlayWidth / surfaceW
-                val scaleY = mOverlayHeight / surfaceH
-                // OVERLAY_MARGIN_PX pixels inset from top-left corner.
+            // ── 1. Static layers stacked vertically at the top-left with margin ──
+            if (hasLayers) {
                 // Clip space spans 2 units (-1..1), so 1 pixel = 2/surfaceN clip units.
                 val marginX = OVERLAY_MARGIN_PX * 2f / surfaceW
                 val marginY = OVERLAY_MARGIN_PX * 2f / surfaceH
+                var clipY = 1f - marginY  // top edge of the next layer in clip space
 
-                val m = FloatArray(16)
-                Matrix.setIdentityM(m, 0)
-                m[0]  = scaleX
-                m[5]  = scaleY
-                m[12] = -1f + scaleX + marginX
-                m[13] =  1f - scaleY - marginY
-                GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                mStaticLayers.forEachIndexed { i, layer ->
+                    val scaleX = layer.widthPx / surfaceW
+                    val scaleY = layer.heightPx / surfaceH
+                    val tx = -1f + scaleX + marginX
+                    val ty = clipY - scaleY
+
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE1 + i)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, layer.textureId)
+                    GLES20.glUniform1i(mOverlayTextureLoc, 1 + i)
+
+                    val m = FloatArray(16)
+                    Matrix.setIdentityM(m, 0)
+                    m[0]  = scaleX
+                    m[5]  = scaleY
+                    m[12] = tx
+                    m[13] = ty
+                    GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                    clipY -= 2f * scaleY  // advance past this layer
+                }
             }
 
             // ── 2. Ticker — scrolls right-to-left at the bottom each frame ──
             if (hasTicker && mTickerHeight > 0) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE2)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + TICKER_TEXTURE_INDEX)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTickerTextureId)
-                GLES20.glUniform1i(mOverlayTextureLoc, 2)
+                GLES20.glUniform1i(mOverlayTextureLoc, TICKER_TEXTURE_INDEX)
 
                 val tickerScaleY = mTickerHeight.toFloat() / surfaceH
                 val tickerScaleX = tickerScaleY * (mTickerWidth.toFloat() / mTickerHeight.toFloat())
@@ -367,26 +375,53 @@ class OpenGlRenderer {
     }
 
     /**
-     * Uploads [update]'s bitmap to a GL_TEXTURE_2D texture (creating it if necessary).
-     * [ticker] = false  → scoreboard overlay (unit 1)
-     * [ticker] = true   → ticker (unit 2)
+     * Uploads each bitmap in [bitmaps] to successive GL texture units starting at GL_TEXTURE1.
+     * Releases any previously active static layers first. Must be called on the GL thread.
+     */
+    private fun uploadLayerBitmaps(bitmaps: List<Bitmap>) {
+        releaseStaticLayers()
+        mStaticLayers = bitmaps.take(MAX_STATIC_LAYERS).mapIndexed { i, bitmap ->
+            val texUnit = GLES20.GL_TEXTURE1 + i
+            GLES20.glActiveTexture(texUnit)
+            val ids = IntArray(1); GLES20.glGenTextures(1, ids, 0)
+            val texId = ids[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            AndroidGLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            checkGlErrorOrThrow("texImage2D (layer $i)")
+            StaticLayer(texId, bitmap.width, bitmap.height)
+        }
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        activateExternalTexture(mExternalTextureId)
+    }
+
+    /** Deletes all active static layer textures. Must be called on the GL thread. */
+    private fun releaseStaticLayers() {
+        if (mStaticLayers.isNotEmpty()) {
+            val ids = mStaticLayers.map { it.textureId }.toIntArray()
+            GLES20.glDeleteTextures(ids.size, ids, 0)
+            mStaticLayers = emptyList()
+        }
+    }
+
+    /**
+     * Uploads [update]'s bitmap to the ticker GL_TEXTURE_2D texture (unit [TICKER_TEXTURE_INDEX]).
      * Must be called on the GL thread.
      */
     private fun uploadOverlayBitmap(update: OverlayUpdate.Set, ticker: Boolean) {
         val bitmap = update.bitmap
-        val unit = if (ticker) GLES20.GL_TEXTURE2 else GLES20.GL_TEXTURE1
+        val unit = if (ticker) GLES20.GL_TEXTURE0 + TICKER_TEXTURE_INDEX else GLES20.GL_TEXTURE1
 
         if (ticker) {
             if (mTickerTextureId == -1) {
                 val t = IntArray(1); GLES20.glGenTextures(1, t, 0); mTickerTextureId = t[0]
             }
-        } else {
-            if (mOverlayTextureId == -1) {
-                val t = IntArray(1); GLES20.glGenTextures(1, t, 0); mOverlayTextureId = t[0]
-            }
         }
 
-        val texId = if (ticker) mTickerTextureId else mOverlayTextureId
+        val texId = if (ticker) mTickerTextureId else return
         GLES20.glActiveTexture(unit)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -394,21 +429,12 @@ class OpenGlRenderer {
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         AndroidGLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
-        checkGlErrorOrThrow("texImage2D (${if (ticker) "ticker" else "overlay"})")
+        checkGlErrorOrThrow("texImage2D (ticker)")
 
-        if (ticker) { mTickerWidth = bitmap.width; mTickerHeight = bitmap.height }
-        else        { mOverlayWidth = bitmap.width; mOverlayHeight = bitmap.height }
+        mTickerWidth = bitmap.width; mTickerHeight = bitmap.height
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         activateExternalTexture(mExternalTextureId)
-    }
-
-    /** Deletes the scoreboard overlay texture. Must be called on the GL thread. */
-    private fun releaseOverlayTexture() {
-        if (mOverlayTextureId != -1) {
-            GLES20.glDeleteTextures(1, intArrayOf(mOverlayTextureId), 0)
-            mOverlayTextureId = -1; mOverlayWidth = 0; mOverlayHeight = 0
-        }
     }
 
     /** Deletes the ticker texture. Must be called on the GL thread. */
@@ -827,14 +853,14 @@ class OpenGlRenderer {
 
     private fun releaseInternal() {
         // Delete overlay resources.
-        releaseOverlayTexture()
+        releaseStaticLayers()
         releaseTickerTexture()
+        mPendingLayersUpdate.set(null)
         mPendingTickerUpdate.set(null)
         if (mOverlayProgramHandle != -1) {
             GLES20.glDeleteProgram(mOverlayProgramHandle)
             mOverlayProgramHandle = -1
         }
-        mPendingOverlayUpdate.set(null)
 
         // Delete program
         for (program in mProgramHandles.values) {
@@ -938,6 +964,14 @@ class OpenGlRenderer {
         private const val TAG = "OpenGlRenderer"
 
         // ── Overlay / ticker constants ──────────────────────────────────────
+        /** Maximum number of independent static overlay layers (GL_TEXTURE1..3). */
+        private const val MAX_STATIC_LAYERS = 3
+        /**
+         * Texture unit index used by the ticker (glUniform1i value and GL_TEXTURE0 offset).
+         * = MAX_STATIC_LAYERS + 1 = 4 → GL_TEXTURE4.
+         */
+        private const val TICKER_TEXTURE_INDEX = MAX_STATIC_LAYERS + 1
+
         /** Pixel margin from the top-left corner for the scoreboard overlay. */
         private const val OVERLAY_MARGIN_PX = 16f
         /** Vertical position of the ticker centre in clip space (near bottom). */
@@ -986,4 +1020,7 @@ class OpenGlRenderer {
         /** Remove the current overlay texture. */
         object Clear : OverlayUpdate()
     }
+
+    /** One uploaded GL_TEXTURE_2D overlay layer. */
+    private data class StaticLayer(val textureId: Int, val widthPx: Int, val heightPx: Int)
 }

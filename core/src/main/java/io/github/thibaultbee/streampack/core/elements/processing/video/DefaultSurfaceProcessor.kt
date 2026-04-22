@@ -225,10 +225,13 @@ private class DefaultSurfaceProcessor(
         }
     }
 
+    override fun setOverlayBitmaps(bitmaps: List<Bitmap>) {
+        if (isReleaseRequested.get()) return
+        renderer.setOverlayBitmaps(bitmaps)
+    }
+
     override fun setOverlayBitmap(bitmap: Bitmap?) {
         if (isReleaseRequested.get()) return
-        // renderer.setOverlayBitmap just stores an AtomicReference, so it is safe to call
-        // from any thread without posting to the GL handler.
         renderer.setOverlayBitmap(bitmap)
     }
 

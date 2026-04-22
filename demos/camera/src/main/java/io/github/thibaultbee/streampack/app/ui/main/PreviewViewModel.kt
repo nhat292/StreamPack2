@@ -172,15 +172,17 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 val streamerRef = streamer
                 viewModelScope.launch(Dispatchers.Default) {
                     try {
-                        // Scoreboard overlay (static, top-left).
-                        val scoreboard = TextOverlayBitmapFactory.create(
-                            text3 = "Champions League – Group A",
-                            text1 = "Real Madrid",
-                            score1 = "6", matchScore1 = "1", turn1 = "serving",
-                            text2 = "Barcelona",
-                            score2 = "4", matchScore2 = "0",
+                        // Scoreboard overlay: 3 independent cached layers (text3, players, text4).
+                        val layers = TextOverlayBitmapFactory.createLayers(
+                            TextOverlayBitmapFactory.OverlayParams(
+                                text3 = "Champions League – Group A",
+                                text1 = "Real Madrid",
+                                score1 = "6", matchScore1 = "1", turn1 = "serving",
+                                text2 = "Barcelona",
+                                score2 = "4", matchScore2 = "0",
+                            )
                         )
-                        streamerRef.videoInput?.processor?.setOverlayBitmap(scoreboard)
+                        streamerRef.videoInput?.processor?.setOverlayBitmaps(layers)
 
                         // Ticker (animated, scrolls right-to-left at the bottom).
                         val ticker = TextOverlayBitmapFactory.createTickerBitmap(

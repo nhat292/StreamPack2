@@ -45,10 +45,10 @@ import kotlin.math.min
 object TextOverlayBitmapFactory {
 
     // ── Layout constants ──────────────────────────────────────────────────
-    private const val TEXT_SIZE = 18f    // 30 * 0.6 (40 % smaller)
-    private const val TEXT3_SIZE = 18f   // 30 * 0.6
-    private const val TEXT4_SIZE = 15f   // 25 * 0.6
-    private const val TICKER_SIZE = 17f  // 28 * 0.6
+    private const val TEXT_SIZE = 12f 
+    private const val TEXT3_SIZE = 12f
+    private const val TEXT4_SIZE = 12f
+    private const val TICKER_SIZE = 12f
     private const val PADDING = 14f
     private const val BORDER_WIDTH = 1f
 
@@ -66,8 +66,20 @@ object TextOverlayBitmapFactory {
     private val COLOR_TICKER_BG = Color.parseColor("#66000000")
 
     // ── Cache ─────────────────────────────────────────────────────────────
+
+    // Legacy single-bitmap cache used by create().
     private var lastParams: OverlayParams? = null
     private var cachedBitmap: Bitmap? = null
+
+    // Per-layer caches used by createLayers().
+    private var lastText3: String? = null
+    private var cachedText3Bitmap: Bitmap? = null
+
+    private var lastPlayerKey: PlayerCacheKey? = null
+    private var cachedPlayerBitmap: Bitmap? = null
+
+    private var lastText4: String? = null
+    private var cachedText4Bitmap: Bitmap? = null
 
     // Ticker bitmap cache (separate from the scoreboard bitmap).
     private var lastTickerText: String? = null
@@ -145,6 +157,47 @@ object TextOverlayBitmapFactory {
     }
 
     /**
+     * Returns up to 3 independently-cached bitmaps in top-to-bottom visual order:
+     * [text3 bar, player rows, text4 bar]. Only absent or changed layers are rebuilt.
+     *
+     * Pass the returned list to
+     * `streamer.videoInput.processor.setOverlayBitmaps(layers)` so the GL renderer
+     * stacks them vertically at the top-left corner, each in its own GL texture.
+     */
+    fun createLayers(params: OverlayParams): List<Bitmap> {
+        val result = mutableListOf<Bitmap>()
+
+        // Layer 0: text3 (yellow match/group label bar)
+        if (params.text3 != lastText3 || cachedText3Bitmap?.isRecycled != false) {
+            cachedText3Bitmap = buildText3Bitmap(params)
+            lastText3 = params.text3
+        }
+        cachedText3Bitmap?.let { result.add(it) }
+
+        // Layer 1: both player scoreboard rows (score, point, turn…)
+        val playerKey = params.toPlayerCacheKey()
+        if (playerKey != lastPlayerKey || cachedPlayerBitmap?.isRecycled != false) {
+            cachedPlayerBitmap = buildPlayerBitmap(params)
+            lastPlayerKey = playerKey
+        }
+        cachedPlayerBitmap?.let { result.add(it) }
+
+        // Layer 2: text4 (blue venue/event bar)
+        if (params.text4 != lastText4 || cachedText4Bitmap?.isRecycled != false) {
+            cachedText4Bitmap = buildText4Bitmap(params)
+            lastText4 = params.text4
+        }
+        cachedText4Bitmap?.let { result.add(it) }
+
+        return result
+    }
+
+    private fun OverlayParams.toPlayerCacheKey() = PlayerCacheKey(
+        text1, text2, score1, score2, matchScore1, matchScore2,
+        point1, point2, turn1, turn2, tbScore1, tbScore2, isTennis,
+    )
+
+    /**
      * Builds a bitmap containing only the ticker text.
      *
      * This bitmap should be passed to
@@ -168,6 +221,23 @@ object TextOverlayBitmapFactory {
     }
 
     // ── Internal model ────────────────────────────────────────────────────
+
+    /** Cache key for the player-rows layer; covers every field that affects its appearance. */
+    private data class PlayerCacheKey(
+        val text1: String,
+        val text2: String,
+        val score1: String,
+        val score2: String,
+        val matchScore1: String,
+        val matchScore2: String,
+        val point1: String?,
+        val point2: String?,
+        val turn1: String,
+        val turn2: String,
+        val tbScore1: String?,
+        val tbScore2: String?,
+        val isTennis: Boolean,
+    )
 
     /**
      * Pre-measured label row (text3, text4, ticker).
@@ -373,6 +443,49 @@ object TextOverlayBitmapFactory {
             drawLabel(canvas, text4, yOffset, canvasWidth)
         }
 
+        return bitmap
+    }
+
+    private fun buildText3Bitmap(p: OverlayParams): Bitmap? {
+        if (p.text3.isEmpty()) return null
+        val label = measureLabel(p.text3, TEXT3_SIZE, COLOR_TEXT3_TEXT, COLOR_TEXT3_BG, BORDER_WIDTH)
+        val bitmap = Bitmap.createBitmap(label.w, label.h, Bitmap.Config.ARGB_8888)
+        drawLabel(Canvas(bitmap), label, 0, label.w)
+        return bitmap
+    }
+
+    private fun buildPlayerBitmap(p: OverlayParams): Bitmap? {
+        val scoreLayout = buildScoreboardLayout(p) ?: return null
+        val rowCount = (if (p.text1.isNotEmpty()) 1 else 0) + (if (p.text2.isNotEmpty()) 1 else 0)
+        if (rowCount == 0) return null
+        val w = scoreLayout.rowWidth
+        val h = scoreLayout.rowH * rowCount
+        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        var yOffset = 0
+        if (p.text1.isNotEmpty()) {
+            drawScoreboardRow(
+                canvas, p.text1, p.turn1, p.matchScore1,
+                p.score1, p.point1, p.tbScore1, p.isTennis,
+                scoreLayout, yOffset, w,
+            )
+            yOffset += scoreLayout.rowH
+        }
+        if (p.text2.isNotEmpty()) {
+            drawScoreboardRow(
+                canvas, p.text2, p.turn2, p.matchScore2,
+                p.score2, p.point2, p.tbScore2, p.isTennis,
+                scoreLayout, yOffset, w,
+            )
+        }
+        return bitmap
+    }
+
+    private fun buildText4Bitmap(p: OverlayParams): Bitmap? {
+        if (p.text4.isEmpty()) return null
+        val label = measureLabel(p.text4, TEXT4_SIZE, Color.WHITE, COLOR_TEXT4_BG, BORDER_WIDTH)
+        val bitmap = Bitmap.createBitmap(label.w, label.h, Bitmap.Config.ARGB_8888)
+        drawLabel(Canvas(bitmap), label, 0, label.w)
         return bitmap
     }
 

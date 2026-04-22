@@ -61,16 +61,25 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
      *
      * This call is thread-safe; the actual texture upload happens on the GL thread.
      *
-     * Example – render a text label using [io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory]:
-     * ```kotlin
-     * val overlay = TextOverlayBitmapFactory.create("Hello to live streaming platform")
-     * streamer.videoInput.processor.setOverlayBitmap(overlay)
-     * ```
-     *
      * Default implementation is a no-op so existing [ISurfaceProcessorInternal] implementations
      * are not broken.
      */
     fun setOverlayBitmap(bitmap: Bitmap?) { /* no-op by default */ }
+
+    /**
+     * Replaces the static overlay with a list of independently-positioned bitmaps.  The bitmaps
+     * are stacked vertically (top-to-bottom) at the top-left corner of the frame, each rendered
+     * in its own GL texture.  Pass an empty list to clear the overlay.
+     *
+     * Use [io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory.createLayers]
+     * to build the layer list with per-layer caching.
+     *
+     * This call is thread-safe; texture uploads happen on the GL thread.
+     *
+     * Default implementation is a no-op so existing [ISurfaceProcessorInternal] implementations
+     * are not broken.
+     */
+    fun setOverlayBitmaps(bitmaps: List<Bitmap>) { /* no-op by default */ }
 
     /**
      * Sets or clears the ticker bitmap that will be animated (scrolled right-to-left) at the
