@@ -45,10 +45,10 @@ import kotlin.math.min
 object TextOverlayBitmapFactory {
 
     // ── Layout constants ──────────────────────────────────────────────────
-    private const val TEXT_SIZE = 30f
-    private const val TEXT3_SIZE = 30f
-    private const val TEXT4_SIZE = 25f
-    private const val TICKER_SIZE = 28f
+    private const val TEXT_SIZE = 21f
+    private const val TEXT3_SIZE = 21f
+    private const val TEXT4_SIZE = 18f
+    private const val TICKER_SIZE = 20f
     private const val PADDING = 14f
     private const val V_PADDING = PADDING * 0.8f   // vertical-only padding (80% of PADDING)
     private const val BORDER_WIDTH = 1f
@@ -354,6 +354,8 @@ object TextOverlayBitmapFactory {
         val hasPoint = p.point1 != null || p.point2 != null
         val hasTb = p.tbScore1 != null || p.tbScore2 != null
 
+        // Square cells: inner rect height = rowH - 2*BORDER_WIDTH; set width equal.
+        val squareColW = (rowH - 2 * BORDER_WIDTH).coerceAtLeast(1f)
         return ScoreboardLayout(
             nameColW = nameColW,
             rowH = rowH,
@@ -363,11 +365,11 @@ object TextOverlayBitmapFactory {
             hasScore = hasScore,
             hasPoint = hasPoint,
             hasTb = hasTb,
-            turnColW = if (hasTurn) sampleColWidth(paint, "000") else 0f,
-            matchScoreColW = if (hasMatchScore) sampleColWidth(paint, "000") else 0f,
-            scoreColW = if (hasScore) sampleColWidth(paint, "000") else 0f,
-            pointColW = if (hasPoint) sampleColWidth(paint, "0000") else 0f,
-            tbColW = if (hasTb) sampleColWidth(paint, "000") else 0f,
+            turnColW = if (hasTurn) squareColW else 0f,
+            matchScoreColW = if (hasMatchScore) squareColW else 0f,
+            scoreColW = if (hasScore) squareColW else 0f,
+            pointColW = if (hasPoint) squareColW else 0f,
+            tbColW = if (hasTb) squareColW else 0f,
         )
     }
 
@@ -567,13 +569,13 @@ object TextOverlayBitmapFactory {
 
         var cursorX = canvasWidth - BORDER_WIDTH - PADDING - scoreBlockW
 
-        // Turn indicator
+        // Turn indicator — background + indicator only drawn when value is non-empty
         if (layout.hasTurn) {
-            cursorX += PADDING   // skip the leading gap included in scoreBlockW
+            cursorX += PADDING
             val bw = layout.turnColW
             val rect = RectF(cursorX, top + BORDER_WIDTH, cursorX + bw, bottom - BORDER_WIDTH)
-            canvas.drawRect(rect, fillPaint(COLOR_PLAYER_BG))
             if (turn.isNotEmpty()) {
+                canvas.drawRect(rect, fillPaint(COLOR_PLAYER_BG))
                 if (isTennis) {
                     val radius = min(rect.width(), rect.height()) / 3.5f
                     canvas.drawCircle(rect.centerX(), rect.centerY(), radius, fillPaint(Color.GREEN))
@@ -587,12 +589,12 @@ object TextOverlayBitmapFactory {
             cursorX += bw
         }
 
-        // Match score (white bg, black text)
+        // Match score — square cell, hidden when empty
         if (layout.hasMatchScore) {
             val bw = layout.matchScoreColW
             val rect = RectF(cursorX, top + BORDER_WIDTH, cursorX + bw, bottom - BORDER_WIDTH)
-            canvas.drawRect(rect, fillPaint(COLOR_MATCH_SCORE_BG))
             if (matchScore.isNotEmpty()) {
+                canvas.drawRect(rect, fillPaint(COLOR_MATCH_SCORE_BG))
                 canvas.drawText(
                     matchScore, rect.centerX(), baseline,
                     textPaint(Color.BLACK, TEXT_SIZE, Paint.Align.CENTER),
@@ -601,12 +603,12 @@ object TextOverlayBitmapFactory {
             cursorX += bw
         }
 
-        // Set score (dark-blue bg, white text)
+        // Set score — square cell, hidden when empty
         if (layout.hasScore) {
             val bw = layout.scoreColW
             val rect = RectF(cursorX, top + BORDER_WIDTH, cursorX + bw, bottom - BORDER_WIDTH)
-            canvas.drawRect(rect, fillPaint(COLOR_SCORE_BG))
             if (score.isNotEmpty()) {
+                canvas.drawRect(rect, fillPaint(COLOR_SCORE_BG))
                 canvas.drawText(
                     score, rect.centerX(), baseline,
                     textPaint(Color.WHITE, TEXT_SIZE, Paint.Align.CENTER),
@@ -615,12 +617,12 @@ object TextOverlayBitmapFactory {
             cursorX += bw
         }
 
-        // Point (yellow bg, red text)
+        // Point — square cell, hidden when empty
         if (layout.hasPoint) {
             val bw = layout.pointColW
             val rect = RectF(cursorX, top + BORDER_WIDTH, cursorX + bw, bottom - BORDER_WIDTH)
-            canvas.drawRect(rect, fillPaint(COLOR_POINT_BG))
             if (!point.isNullOrEmpty()) {
+                canvas.drawRect(rect, fillPaint(COLOR_POINT_BG))
                 canvas.drawText(
                     point, rect.centerX(), baseline,
                     textPaint(COLOR_POINT_TEXT, TEXT_SIZE, Paint.Align.CENTER),
@@ -629,12 +631,12 @@ object TextOverlayBitmapFactory {
             cursorX += bw
         }
 
-        // Tie-break (red bg, white text)
+        // Tie-break — square cell, hidden when empty
         if (layout.hasTb) {
             val bw = layout.tbColW
             val rect = RectF(cursorX, top + BORDER_WIDTH, cursorX + bw, bottom - BORDER_WIDTH)
-            canvas.drawRect(rect, fillPaint(COLOR_TB_BG))
             if (!tbScore.isNullOrEmpty()) {
+                canvas.drawRect(rect, fillPaint(COLOR_TB_BG))
                 canvas.drawText(
                     tbScore, rect.centerX(), baseline,
                     textPaint(Color.WHITE, TEXT_SIZE, Paint.Align.CENTER),
