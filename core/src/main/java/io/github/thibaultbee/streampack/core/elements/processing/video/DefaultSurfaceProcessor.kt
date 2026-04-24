@@ -38,6 +38,11 @@ import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Compan
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 import io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory
 import io.github.thibaultbee.streampack.core.pipelines.utils.HandlerThreadExecutor
+import android.graphics.BitmapFactory
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 
@@ -51,6 +56,16 @@ private class DefaultSurfaceProcessor(
 
     private val isReleaseRequested = AtomicBoolean(false)
     private var isReleased = false
+
+    // URL → decoded Bitmap cache for link corner images. Shared across applyOverlayParams calls
+    // so repeated calls with the same URLs skip the network entirely.
+    private val linkBitmapCache = ConcurrentHashMap<String, Bitmap>()
+
+    // Single background thread for link image downloads — serialises requests so the same URL
+    // is never downloaded twice even if applyOverlayParams is called rapidly.
+    private val linkDownloadExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "LinkBitmapDownloader").also { it.isDaemon = true }
+    }
 
     private val textureMatrix = FloatArray(16)
     private val surfaceOutputMatrix = FloatArray(16)
@@ -207,6 +222,7 @@ private class DefaultSurfaceProcessor(
         if (isReleaseRequested.getAndSet(true)) {
             return
         }
+        linkDownloadExecutor.shutdown()
         executeSafely(block = {
             if (!isReleased) {
                 isReleased = true
@@ -248,11 +264,54 @@ private class DefaultSurfaceProcessor(
 
     override fun applyOverlayParams(params: TextOverlayBitmapFactory.OverlayParams) {
         if (isReleaseRequested.get()) return
+
+        // Text scoreboard + ticker — built from bitmaps, no I/O.
         setOverlayBitmaps(TextOverlayBitmapFactory.createLayers(params))
-        val ticker = if (params.tickerText.isNotEmpty())
-            TextOverlayBitmapFactory.createTickerBitmap(params.tickerText)
-        else null
-        setTickerBitmap(ticker)
+        setTickerBitmap(
+            if (params.tickerText.isNotEmpty())
+                TextOverlayBitmapFactory.createTickerBitmap(params.tickerText)
+            else null
+        )
+
+        // Link corner images — download missing URLs on the background thread, then upload.
+        val url1 = params.link1
+        val url2 = params.link2
+        val url3 = params.link3
+        val urls = listOf(url1, url2, url3)
+
+        if (urls.all { it.isEmpty() || linkBitmapCache.containsKey(it) }) {
+            // All already cached — upload immediately without touching the executor.
+            applyLinkBitmapsFromCache(url1, url2, url3)
+        } else {
+            linkDownloadExecutor.execute {
+                if (isReleaseRequested.get()) return@execute
+                urls.forEach { downloadLinkIfMissing(it) }
+                if (!isReleaseRequested.get()) applyLinkBitmapsFromCache(url1, url2, url3)
+            }
+        }
+    }
+
+    private fun applyLinkBitmapsFromCache(url1: String, url2: String, url3: String) {
+        setLinkBitmaps(
+            linkBitmapCache[url1],
+            linkBitmapCache[url2],
+            linkBitmapCache[url3]
+        )
+    }
+
+    private fun downloadLinkIfMissing(url: String) {
+        if (url.isEmpty() || linkBitmapCache.containsKey(url)) return
+        try {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            connection.connect()
+            val bitmap = BitmapFactory.decodeStream(connection.inputStream)
+            if (bitmap != null) linkBitmapCache[url] = bitmap
+            else Logger.w(TAG, "Link bitmap decode returned null for $url")
+        } catch (e: Exception) {
+            Logger.e(TAG, "Failed to download link bitmap: $url", e)
+        }
     }
 
     override fun snapshot(
