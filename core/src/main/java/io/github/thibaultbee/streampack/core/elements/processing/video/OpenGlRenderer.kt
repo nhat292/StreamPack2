@@ -120,6 +120,12 @@ class OpenGlRenderer {
     private var mTickerX = TICKER_START_X
     // ── End ticker support ──────────────────────────────────────────────────
 
+    // ── Link image corner overlays ───────────────────────────────────────────
+    private val mPendingLinkUpdate = AtomicReference<LinkBitmaps?>(null)
+    /** Textures for the 3 corner images: [0]=top-right, [1]=bottom-left, [2]=bottom-right. */
+    private val mLinkLayers: Array<StaticLayer?> = arrayOfNulls(3)
+    // ── End link image support ───────────────────────────────────────────────
+
     /**
      * Y-flipped texture coordinates for 2D bitmaps.
      * Android Bitmap row 0 (top) maps to GL texture t=0 (bottom), so we flip the t-axis here
@@ -237,6 +243,18 @@ class OpenGlRenderer {
         )
     }
 
+    /**
+     * Sets corner image overlays from bitmaps.
+     * - [link1] → top-right corner
+     * - [link2] → bottom-left corner
+     * - [link3] → bottom-right corner
+     *
+     * Pass `null` for any slot to clear that corner. Thread-safe; upload happens on the GL thread.
+     */
+    fun setLinkBitmaps(link1: Bitmap?, link2: Bitmap?, link3: Bitmap?) {
+        mPendingLinkUpdate.set(LinkBitmaps(link1, link2, link3))
+    }
+
     // ── Private overlay helpers ───────────────────────────────────────────────
 
     /**
@@ -271,57 +289,58 @@ class OpenGlRenderer {
 
     /**
      * Checks for pending overlay/ticker updates, draws each static layer stacked vertically at
-     * the top-left, then animates the ticker (right-to-left) at the bottom.
+     * the top-left, then link images at their corners, then the scrolling ticker at the bottom.
      * Must be called on the GL thread, inside [render], after the main draw call.
      */
     private fun renderOverlay(outputSurface: OutputSurface) {
-        // Apply pending layer list update (empty list = clear all layers).
+        // Apply pending updates (all processed before any drawing).
         mPendingLayersUpdate.getAndSet(null)?.let { uploadLayerBitmaps(it) }
+        mPendingLinkUpdate.getAndSet(null)?.let { uploadLinkBitmaps(it) }
 
-        // Apply pending ticker update.
         val tickerUpdate = mPendingTickerUpdate.getAndSet(null)
         when (tickerUpdate) {
             is OverlayUpdate.Set -> {
                 uploadOverlayBitmap(update = tickerUpdate, ticker = true)
-                mTickerX = TICKER_START_X
+                // Intentionally do NOT reset mTickerX — keep position as scrolling continues.
             }
             is OverlayUpdate.Clear -> releaseTickerTexture()
             null -> {}
         }
 
         val hasLayers = mStaticLayers.isNotEmpty()
+        val hasLinks = mLinkLayers.any { it != null }
         val hasTicker = mTickerTextureId != -1
-        if (!hasLayers && !hasTicker) return
+        if (!hasLayers && !hasLinks && !hasTicker) return
 
         val surfaceW = outputSurface.viewPortRect.width().toFloat()
         val surfaceH = outputSurface.viewPortRect.height().toFloat()
         if (surfaceW <= 0f || surfaceH <= 0f) return
 
-        // Everything from glEnable onwards is inside try-finally so GL state
-        // (blend, vertex arrays, program, active texture) is ALWAYS restored even
-        // when a setup or draw call fails.  Leaving GL_BLEND enabled for the next
-        // camera frame would corrupt encoded output and eventually kill the RTMP stream.
+        // Ticker geometry computed once — needed for link Y positioning below.
+        val tickerScaleY = if (hasTicker && mTickerHeight > 0) mTickerHeight.toFloat() / surfaceH else 0f
+        val tickerScaleX = if (tickerScaleY > 0f) tickerScaleY * (mTickerWidth.toFloat() / mTickerHeight.toFloat()) else 0f
+        // Top edge of the ticker bar in clip space.
+        val tickerTopEdge = TICKER_Y + tickerScaleY
+
         try {
             GLES20.glEnable(GLES20.GL_BLEND)
             GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
             GLES20.glUseProgram(mOverlayProgramHandle)
 
-            // Vertex / tex-coord pointers are shared by all draws; configure once.
             GLES20.glEnableVertexAttribArray(mOverlayPositionLoc)
             GLES20.glVertexAttribPointer(mOverlayPositionLoc, 2, GLES20.GL_FLOAT, false, 0, VERTEX_BUF)
             GLES20.glEnableVertexAttribArray(mOverlayTexCoordLoc)
             GLES20.glVertexAttribPointer(mOverlayTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, mOverlayTexBuf)
 
-            // ── 1. Static layers stacked vertically at the top-left with margin ──
+            // ── 1. Static text/score layers — top-left, scaled to 80% of natural pixel size ──
             if (hasLayers) {
-                // Clip space spans 2 units (-1..1), so 1 pixel = 2/surfaceN clip units.
                 val marginX = OVERLAY_MARGIN_PX * 2f / surfaceW
                 val marginY = OVERLAY_MARGIN_PX * 2f / surfaceH
-                var clipY = 1f - marginY  // top edge of the next layer in clip space
+                var clipY = 1f - marginY
 
                 mStaticLayers.forEachIndexed { i, layer ->
-                    val scaleX = layer.widthPx / surfaceW
-                    val scaleY = layer.heightPx / surfaceH
+                    val scaleX = layer.widthPx / surfaceW * OVERLAY_SCALE
+                    val scaleY = layer.heightPx / surfaceH * OVERLAY_SCALE
                     val tx = -1f + scaleX + marginX
                     val ty = clipY - scaleY
 
@@ -331,40 +350,76 @@ class OpenGlRenderer {
 
                     val m = FloatArray(16)
                     Matrix.setIdentityM(m, 0)
-                    m[0]  = scaleX
-                    m[5]  = scaleY
-                    m[12] = tx
-                    m[13] = ty
+                    m[0] = scaleX; m[5] = scaleY; m[12] = tx; m[13] = ty
                     GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
                     GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-                    clipY -= 2f * scaleY  // advance past this layer
+                    clipY -= 2f * scaleY
                 }
             }
 
-            // ── 2. Ticker — scrolls right-to-left at the bottom each frame ──
-            if (hasTicker && mTickerHeight > 0) {
+            // ── 2. Link corner images ──
+            // Each link spans ~half the screen width (LINK_HALF_EXTENT half-extent each).
+            // link1 → top-right corner.
+            // link2 → bottom-left, link3 → bottom-right; both sit just above the ticker.
+            // A small horizontal inner gap (LINK_INNER_GAP) is left between link2 and link3.
+            if (hasLinks) {
+                mLinkLayers.forEachIndexed { i, layer ->
+                    if (layer == null) return@forEachIndexed
+
+                    val aspect = layer.widthPx.toFloat() / layer.heightPx.toFloat()
+                    val scaleX = LINK_HALF_EXTENT
+                    val scaleY = scaleX / aspect
+
+                    val tx: Float
+                    val ty: Float
+                    when (i) {
+                        0 -> {  // link1 — top-right corner
+                            // Right edge at 1-MARGIN, top edge at 1-MARGIN
+                            tx = 1f - scaleX - LINK_EDGE_MARGIN
+                            ty = 1f - scaleY - LINK_EDGE_MARGIN
+                        }
+                        1 -> {  // link2 — bottom-left, screen-edge aligned, above ticker
+                            // Left edge at -1; natural gap to link3 = 2*(1-2*LINK_HALF_EXTENT)
+                            tx = -1f + scaleX
+                            ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
+                        }
+                        else -> {  // link3 — bottom-right, screen-edge aligned, above ticker
+                            // Right edge at 1
+                            tx = 1f - scaleX
+                            ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
+                        }
+                    }
+
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + LINK_TEXTURE_BASE + i)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, layer.textureId)
+                    GLES20.glUniform1i(mOverlayTextureLoc, LINK_TEXTURE_BASE + i)
+
+                    val m = FloatArray(16)
+                    Matrix.setIdentityM(m, 0)
+                    m[0] = scaleX; m[5] = scaleY; m[12] = tx; m[13] = ty
+                    GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                }
+            }
+
+            // ── 3. Ticker — scrolls right-to-left at the very bottom each frame ──
+            if (hasTicker && tickerScaleY > 0f) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + TICKER_TEXTURE_INDEX)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, mTickerTextureId)
                 GLES20.glUniform1i(mOverlayTextureLoc, TICKER_TEXTURE_INDEX)
 
-                val tickerScaleY = mTickerHeight.toFloat() / surfaceH
-                val tickerScaleX = tickerScaleY * (mTickerWidth.toFloat() / mTickerHeight.toFloat())
-
                 mTickerX -= TICKER_SPEED
+                // Loop: when fully off the left edge, reappear from the right.
                 if (mTickerX < -1f - tickerScaleX) mTickerX = 1f + tickerScaleX
 
                 val m = FloatArray(16)
                 Matrix.setIdentityM(m, 0)
-                m[0]  = tickerScaleX
-                m[5]  = tickerScaleY
-                m[12] = mTickerX
-                m[13] = TICKER_Y
+                m[0] = tickerScaleX; m[5] = tickerScaleY; m[12] = mTickerX; m[13] = TICKER_Y
                 GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             }
         } finally {
-            // Always restore GL state so the camera frame rendering is unaffected.
             GLES20.glDisableVertexAttribArray(mOverlayPositionLoc)
             GLES20.glDisableVertexAttribArray(mOverlayTexCoordLoc)
             GLES20.glDisable(GLES20.GL_BLEND)
@@ -435,6 +490,50 @@ class OpenGlRenderer {
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         activateExternalTexture(mExternalTextureId)
+    }
+
+    /**
+     * Uploads link bitmaps to their dedicated texture units (GL_TEXTURE5–7).
+     * A null slot releases the existing texture for that corner. Must be called on the GL thread.
+     */
+    private fun uploadLinkBitmaps(links: LinkBitmaps) {
+        val bitmaps = listOf(links.link1, links.link2, links.link3)
+        bitmaps.forEachIndexed { i, bitmap ->
+            val existing = mLinkLayers[i]
+            if (bitmap == null) {
+                if (existing != null) {
+                    GLES20.glDeleteTextures(1, intArrayOf(existing.textureId), 0)
+                    mLinkLayers[i] = null
+                }
+            } else {
+                if (existing != null) {
+                    GLES20.glDeleteTextures(1, intArrayOf(existing.textureId), 0)
+                }
+                val texUnit = GLES20.GL_TEXTURE0 + LINK_TEXTURE_BASE + i
+                GLES20.glActiveTexture(texUnit)
+                val ids = IntArray(1); GLES20.glGenTextures(1, ids, 0)
+                val texId = ids[0]
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                AndroidGLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+                mLinkLayers[i] = StaticLayer(texId, bitmap.width, bitmap.height)
+            }
+        }
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        activateExternalTexture(mExternalTextureId)
+    }
+
+    /** Deletes all active link corner textures. Must be called on the GL thread. */
+    private fun releaseLinkLayers() {
+        mLinkLayers.forEachIndexed { i, layer ->
+            if (layer != null) {
+                GLES20.glDeleteTextures(1, intArrayOf(layer.textureId), 0)
+                mLinkLayers[i] = null
+            }
+        }
     }
 
     /** Deletes the ticker texture. Must be called on the GL thread. */
@@ -855,8 +954,10 @@ class OpenGlRenderer {
         // Delete overlay resources.
         releaseStaticLayers()
         releaseTickerTexture()
+        releaseLinkLayers()
         mPendingLayersUpdate.set(null)
         mPendingTickerUpdate.set(null)
+        mPendingLinkUpdate.set(null)
         if (mOverlayProgramHandle != -1) {
             GLES20.glDeleteProgram(mOverlayProgramHandle)
             mOverlayProgramHandle = -1
@@ -971,15 +1072,28 @@ class OpenGlRenderer {
          * = MAX_STATIC_LAYERS + 1 = 4 → GL_TEXTURE4.
          */
         private const val TICKER_TEXTURE_INDEX = MAX_STATIC_LAYERS + 1
+        /** Base texture unit index for link corner images (GL_TEXTURE5..7). */
+        private const val LINK_TEXTURE_BASE = TICKER_TEXTURE_INDEX + 1
 
         /** Pixel margin from the top-left corner for the scoreboard overlay. */
         private const val OVERLAY_MARGIN_PX = 16f
-        /** Vertical position of the ticker centre in clip space (near bottom). */
-        private const val TICKER_Y = -0.92f
+        /** Scale factor applied to static text/score overlay layers (80% of natural pixel size). */
+        private const val OVERLAY_SCALE = 0.8f
+        /** Vertical position of the ticker centre in clip space (very bottom). */
+        private const val TICKER_Y = -0.93f
         /** Clip-space units the ticker moves left per frame. */
         private const val TICKER_SPEED = 0.003f
         /** Initial X position (fully off-screen right) when a new ticker starts. */
         private const val TICKER_START_X = 1.1f
+
+        // ── Link image constants ────────────────────────────────────────────
+        /** Half-extent of each link image in clip-space X (≈ half screen width each).
+         *  Since 0.45 < 0.5, link2 and link3 naturally have a ~20% screen-width gap between them. */
+        private const val LINK_HALF_EXTENT = 0.45f
+        /** Clip-space gap between the bottom of link2/link3 and the top of the ticker. */
+        private const val LINK_TICKER_GAP = 0.02f
+        /** Clip-space margin from screen edges for link1 (top-right). */
+        private const val LINK_EDGE_MARGIN = 0.02f
 
         // ── Overlay shaders ─────────────────────────────────────────────────
         /**
@@ -1020,6 +1134,9 @@ class OpenGlRenderer {
         /** Remove the current overlay texture. */
         object Clear : OverlayUpdate()
     }
+
+    /** Pending set of corner link bitmaps (null = clear that slot). */
+    private data class LinkBitmaps(val link1: Bitmap?, val link2: Bitmap?, val link3: Bitmap?)
 
     /** One uploaded GL_TEXTURE_2D overlay layer. */
     private data class StaticLayer(val textureId: Int, val widthPx: Int, val heightPx: Int)

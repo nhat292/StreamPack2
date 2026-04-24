@@ -45,11 +45,12 @@ import kotlin.math.min
 object TextOverlayBitmapFactory {
 
     // ── Layout constants ──────────────────────────────────────────────────
-    private const val TEXT_SIZE = 12f 
-    private const val TEXT3_SIZE = 12f
-    private const val TEXT4_SIZE = 12f
-    private const val TICKER_SIZE = 12f
+    private const val TEXT_SIZE = 30f
+    private const val TEXT3_SIZE = 30f
+    private const val TEXT4_SIZE = 25f
+    private const val TICKER_SIZE = 28f
     private const val PADDING = 14f
+    private const val V_PADDING = PADDING * 0.8f   // vertical-only padding (80% of PADDING)
     private const val BORDER_WIDTH = 1f
 
     // Colours
@@ -312,7 +313,7 @@ object TextOverlayBitmapFactory {
         val b = Rect()
         paint.getTextBounds(text, 0, text.length, b)
         val w = (b.width() + PADDING * 2 + borderWidth * 2).toInt().coerceAtLeast(1)
-        val h = (b.height() + PADDING * 2 + borderWidth * 2).toInt().coerceAtLeast(1)
+        val h = (b.height() + V_PADDING * 2 + borderWidth * 2).toInt().coerceAtLeast(1)
         return LabelSection(text, textSize, textColor, bgColor, borderWidth, w, h, b.top)
     }
 
@@ -336,7 +337,7 @@ object TextOverlayBitmapFactory {
         paint.getTextBounds("Ag", 0, 2, glyphBounds)
         val glyphH = glyphBounds.height()
         val glyphTop = glyphBounds.top
-        val rowH = (glyphH + PADDING * 2 + BORDER_WIDTH * 2).toInt().coerceAtLeast(1)
+        val rowH = (glyphH + V_PADDING * 2 + BORDER_WIDTH * 2).toInt().coerceAtLeast(1)
 
         // Name column: max pixel width of both player names
         val nameBounds = Rect()
@@ -412,19 +413,20 @@ object TextOverlayBitmapFactory {
         val canvas = Canvas(bitmap)
         var yOffset = 0
 
-        // 1. Match/group label (yellow bar, text3)
+        // 1. Match/group label (yellow bar, text3) — fits its own text width
         if (text3 != null) {
-            drawLabel(canvas, text3, yOffset, canvasWidth)
+            drawLabel(canvas, text3, yOffset, text3.w)
             yOffset += text3.h
         }
 
-        // 2. Scoreboard rows (both use the same shared layout)
+        // 2. Scoreboard rows — both rows share scoreLayout.rowWidth
+        val playerW = scoreLayout?.rowWidth ?: 0
         if (scoreLayout != null) {
             if (p.text1.isNotEmpty()) {
                 drawScoreboardRow(
                     canvas, p.text1, p.turn1, p.matchScore1,
                     p.score1, p.point1, p.tbScore1, p.isTennis,
-                    scoreLayout, yOffset, canvasWidth,
+                    scoreLayout, yOffset, playerW,
                 )
                 yOffset += scoreLayout.rowH
             }
@@ -432,15 +434,15 @@ object TextOverlayBitmapFactory {
                 drawScoreboardRow(
                     canvas, p.text2, p.turn2, p.matchScore2,
                     p.score2, p.point2, p.tbScore2, p.isTennis,
-                    scoreLayout, yOffset, canvasWidth,
+                    scoreLayout, yOffset, playerW,
                 )
                 yOffset += scoreLayout.rowH
             }
         }
 
-        // 3. Venue/info row (text4)
+        // 3. Venue/info row (text4) — fits its own text width
         if (text4 != null) {
-            drawLabel(canvas, text4, yOffset, canvasWidth)
+            drawLabel(canvas, text4, yOffset, text4.w)
         }
 
         return bitmap
@@ -495,25 +497,22 @@ object TextOverlayBitmapFactory {
         val top = yOffset.toFloat()
         val bottom = top + s.h
         val bw = s.borderWidth
+        // Background fits its own text width (not the full canvas width).
+        val drawW = s.w.toFloat()
 
-        // Background — mirrors the reference: inset by borderWidth on all sides.
-        // When borderWidth = 0 the background fills edge-to-edge (ticker).
         canvas.drawRect(
             bw, top + bw,
-            canvasWidth - bw, bottom - bw,
+            drawW - bw, bottom - bw,
             fillPaint(s.bgColor),
         )
 
-        // baseline = yOffset + padding + borderWidth - glyphTop
-        // glyphTop is negative so subtracting it adds the ascent distance.
-        val baseline = yOffset + PADDING + bw - s.glyphTop
+        val baseline = yOffset + V_PADDING + bw - s.glyphTop
         canvas.drawText(s.text, PADDING + bw, baseline, textPaint(s.textColor, s.textSize))
 
-        // Border drawn last (matches reference draw order).
         if (bw > 0f) {
             canvas.drawRect(
                 bw / 2, top + bw / 2,
-                canvasWidth - bw / 2, bottom - bw / 2,
+                drawW - bw / 2, bottom - bw / 2,
                 strokePaint(COLOR_BORDER, bw),
             )
         }
@@ -545,27 +544,32 @@ object TextOverlayBitmapFactory {
         val top = yOffset.toFloat()
         val bottom = top + layout.rowH
 
-        // Background extends to canvasWidth (not just row width) for consistent appearance.
-        // Matches reference: main background rect is inset by borderWidth on all sides.
         canvas.drawRect(
             BORDER_WIDTH, top + BORDER_WIDTH,
             canvasWidth - BORDER_WIDTH, bottom - BORDER_WIDTH,
             fillPaint(COLOR_PLAYER_BG),
         )
 
-        val paint = textPaint(Color.WHITE, TEXT_SIZE)
-        val baseline = yOffset + PADDING + BORDER_WIDTH - layout.glyphTop
+        val baseline = yOffset + V_PADDING + BORDER_WIDTH - layout.glyphTop
 
-        var cursorX = PADDING + BORDER_WIDTH
+        // Name: left-aligned
+        canvas.drawText(name, PADDING + BORDER_WIDTH, baseline, textPaint(Color.WHITE, TEXT_SIZE))
 
-        // Player name
-        canvas.drawText(name, cursorX, baseline, paint)
-        cursorX += layout.nameColW
+        // Score block: right-aligned.
+        // Compute score block width (mirrors the ScoreboardLayout.rowWidth formula for the
+        // right side, so scores land flush against the right border for the wider row).
+        var scoreBlockW = 0f
+        if (layout.hasTurn) scoreBlockW += PADDING + layout.turnColW  // includes leading gap
+        if (layout.hasMatchScore) scoreBlockW += layout.matchScoreColW
+        if (layout.hasScore) scoreBlockW += layout.scoreColW
+        if (layout.hasPoint) scoreBlockW += layout.pointColW
+        if (layout.hasTb) scoreBlockW += layout.tbColW
 
-        // Turn indicator — drawn for both rows whenever the column is active,
-        // even if this row's turn is empty (background only, no indicator).
+        var cursorX = canvasWidth - BORDER_WIDTH - PADDING - scoreBlockW
+
+        // Turn indicator
         if (layout.hasTurn) {
-            cursorX += PADDING   // leading padding before turn block (matches reference)
+            cursorX += PADDING   // skip the leading gap included in scoreBlockW
             val bw = layout.turnColW
             val rect = RectF(cursorX, top + BORDER_WIDTH, cursorX + bw, bottom - BORDER_WIDTH)
             canvas.drawRect(rect, fillPaint(COLOR_PLAYER_BG))
@@ -638,7 +642,7 @@ object TextOverlayBitmapFactory {
             }
         }
 
-        // Yellow border drawn last so it sits on top of any column that reaches the edge.
+        // Yellow border drawn last.
         canvas.drawRect(
             BORDER_WIDTH / 2, top + BORDER_WIDTH / 2,
             canvasWidth - BORDER_WIDTH / 2, bottom - BORDER_WIDTH / 2,

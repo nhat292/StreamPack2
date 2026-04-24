@@ -240,6 +240,11 @@ private class DefaultSurfaceProcessor(
         renderer.setTickerBitmap(bitmap)
     }
 
+    override fun setLinkBitmaps(link1: Bitmap?, link2: Bitmap?, link3: Bitmap?) {
+        if (isReleaseRequested.get()) return
+        renderer.setLinkBitmaps(link1, link2, link3)
+    }
+
     override fun snapshot(
         @IntRange(from = 0, to = 359) rotationDegrees: Int
     ): ListenableFuture<Bitmap> {

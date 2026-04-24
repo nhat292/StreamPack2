@@ -90,6 +90,12 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
     fun setTickerBitmap(bitmap: Bitmap?) { /* no-op by default */ }
 
     /**
+     * Sets corner image overlays: [link1] top-right, [link2] bottom-left, [link3] bottom-right.
+     * Pass `null` for any slot to clear that corner. Thread-safe; upload happens on the GL thread.
+     */
+    fun setLinkBitmaps(link1: Bitmap?, link2: Bitmap?, link3: Bitmap?) { /* no-op by default */ }
+
+    /**
      * Factory interface for creating instances of [ISurfaceProcessorInternal].
      */
     interface Factory {
