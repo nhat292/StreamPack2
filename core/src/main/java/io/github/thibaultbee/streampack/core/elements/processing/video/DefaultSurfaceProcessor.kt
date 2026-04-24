@@ -36,6 +36,7 @@ import io.github.thibaultbee.streampack.core.elements.utils.time.VideoTimebaseCo
 import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.pipelines.DispatcherProvider.Companion.THREAD_NAME_GL
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
+import io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory
 import io.github.thibaultbee.streampack.core.pipelines.utils.HandlerThreadExecutor
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -243,6 +244,15 @@ private class DefaultSurfaceProcessor(
     override fun setLinkBitmaps(link1: Bitmap?, link2: Bitmap?, link3: Bitmap?) {
         if (isReleaseRequested.get()) return
         renderer.setLinkBitmaps(link1, link2, link3)
+    }
+
+    override fun applyOverlayParams(params: TextOverlayBitmapFactory.OverlayParams) {
+        if (isReleaseRequested.get()) return
+        setOverlayBitmaps(TextOverlayBitmapFactory.createLayers(params))
+        val ticker = if (params.tickerText.isNotEmpty())
+            TextOverlayBitmapFactory.createTickerBitmap(params.tickerText)
+        else null
+        setTickerBitmap(ticker)
     }
 
     override fun snapshot(

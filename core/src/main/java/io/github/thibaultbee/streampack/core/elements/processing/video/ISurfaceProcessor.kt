@@ -22,6 +22,7 @@ import androidx.annotation.IntRange
 import com.google.common.util.concurrent.ListenableFuture
 import io.github.thibaultbee.streampack.core.elements.interfaces.Releasable
 import io.github.thibaultbee.streampack.core.elements.processing.video.outputs.ISurfaceOutput
+import io.github.thibaultbee.streampack.core.elements.processing.video.overlay.TextOverlayBitmapFactory
 import io.github.thibaultbee.streampack.core.elements.utils.av.video.DynamicRangeProfile
 import io.github.thibaultbee.streampack.core.elements.utils.time.Timebase
 import io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
@@ -94,6 +95,19 @@ interface ISurfaceProcessorInternal : ISurfaceProcessor, Releasable {
      * Pass `null` for any slot to clear that corner. Thread-safe; upload happens on the GL thread.
      */
     fun setLinkBitmaps(link1: Bitmap?, link2: Bitmap?, link3: Bitmap?) { /* no-op by default */ }
+
+    /**
+     * Convenience method: builds and uploads all overlay layers (scoreboard text) and the
+     * scrolling ticker from a single [params] object.  Once called, the ticker auto-animates
+     * right-to-left every rendered frame until cleared.
+     *
+     * Replaces the pattern:
+     * ```
+     * setOverlayBitmap(TextOverlayBitmapFactory.create(params))
+     * setTickerBitmap(TextOverlayBitmapFactory.createTickerBitmap(params.tickerText))
+     * ```
+     */
+    fun applyOverlayParams(params: TextOverlayBitmapFactory.OverlayParams) { /* no-op by default */ }
 
     /**
      * Factory interface for creating instances of [ISurfaceProcessorInternal].
