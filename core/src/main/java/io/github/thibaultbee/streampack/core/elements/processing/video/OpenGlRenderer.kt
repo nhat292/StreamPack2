@@ -379,14 +379,12 @@ class OpenGlRenderer {
                             tx = 1f - scaleX - LINK_EDGE_MARGIN
                             ty = 1f - scaleY - LINK_EDGE_MARGIN
                         }
-                        1 -> {  // link2 — bottom-left, screen-edge aligned, above ticker
-                            // Left edge at -1; natural gap to link3 = 2*(1-2*LINK_HALF_EXTENT)
-                            tx = -1f + scaleX
+                        1 -> {  // link2 — bottom-left, above ticker, left edge padded
+                            tx = -1f + scaleX + LINK_EDGE_MARGIN
                             ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
                         }
-                        else -> {  // link3 — bottom-right, screen-edge aligned, above ticker
-                            // Right edge at 1
-                            tx = 1f - scaleX
+                        else -> {  // link3 — bottom-right, above ticker, right edge padded
+                            tx = 1f - scaleX - LINK_EDGE_MARGIN
                             ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
                         }
                     }

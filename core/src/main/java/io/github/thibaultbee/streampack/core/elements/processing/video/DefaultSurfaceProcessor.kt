@@ -301,17 +301,45 @@ private class DefaultSurfaceProcessor(
 
     private fun downloadLinkIfMissing(url: String) {
         if (url.isEmpty() || linkBitmapCache.containsKey(url)) return
-        try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+        var currentUrl = url
+        repeat(5) { // follow up to 5 redirects manually (handles cross-protocol HTTP↔HTTPS)
+            val connection = URL(currentUrl).openConnection() as HttpURLConnection
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
-            connection.connect()
-            val bitmap = BitmapFactory.decodeStream(connection.inputStream)
-            if (bitmap != null) linkBitmapCache[url] = bitmap
-            else Logger.w(TAG, "Link bitmap decode returned null for $url")
-        } catch (e: Exception) {
-            Logger.e(TAG, "Failed to download link bitmap: $url", e)
+            connection.instanceFollowRedirects = false
+            try {
+                connection.connect()
+                val code = connection.responseCode
+                if (code in 300..399) {
+                    val location = connection.getHeaderField("Location")
+                    connection.disconnect()
+                    if (location.isNullOrEmpty()) {
+                        Logger.w(TAG, "Link redirect has no Location for $currentUrl")
+                        return
+                    }
+                    currentUrl = location
+                    return@repeat // continue redirect loop
+                }
+                if (code != 200) {
+                    Logger.w(TAG, "Link HTTP $code for $currentUrl")
+                    connection.disconnect()
+                    return
+                }
+                val bitmap = BitmapFactory.decodeStream(connection.inputStream)
+                connection.disconnect()
+                if (bitmap != null) {
+                    linkBitmapCache[url] = bitmap
+                } else {
+                    Logger.w(TAG, "Link bitmap decode returned null for $currentUrl (content-type: ${connection.contentType})")
+                }
+                return
+            } catch (e: Exception) {
+                connection.disconnect()
+                Logger.e(TAG, "Failed to download link bitmap: $currentUrl", e)
+                return
+            }
         }
+        Logger.w(TAG, "Too many redirects for link $url")
     }
 
     override fun snapshot(

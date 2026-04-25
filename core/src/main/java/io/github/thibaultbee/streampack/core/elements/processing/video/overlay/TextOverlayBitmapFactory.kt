@@ -48,7 +48,7 @@ object TextOverlayBitmapFactory {
     private const val TEXT_SIZE = 21f
     private const val TEXT3_SIZE = 21f
     private const val TEXT4_SIZE = 18f
-    private const val TICKER_SIZE = 20f
+    private const val TICKER_SIZE = 10f
     private const val PADDING = 14f
     private const val V_PADDING = PADDING * 0.8f   // vertical-only padding (80% of PADDING)
     private const val BORDER_WIDTH = 1f
