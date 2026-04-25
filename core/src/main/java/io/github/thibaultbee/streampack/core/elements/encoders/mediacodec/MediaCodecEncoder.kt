@@ -17,6 +17,7 @@ package io.github.thibaultbee.streampack.core.elements.encoders.mediacodec
 
 import android.media.MediaCodec
 import android.media.MediaCodec.BufferInfo
+import java.nio.ByteBuffer
 import android.media.MediaCodec.CodecException
 import android.media.MediaFormat
 import android.os.Bundle
@@ -622,7 +623,19 @@ internal constructor(
             isKeyFrame: Boolean,
             tag: String
         ): FrameWithCloseable {
-            val buffer = requireNotNull(codec.getOutputBuffer(index))
+            val rawBuffer = requireNotNull(codec.getOutputBuffer(index))
+            // Copy into a heap buffer so callers can read the data even if the codec is reset
+            // before the frame is consumed (e.g. surface change during streaming).
+            val buffer = ByteBuffer.allocate(rawBuffer.remaining()).also {
+                it.put(rawBuffer)
+                it.flip()
+            }
+            // Release the MediaCodec slot immediately — our heap copy is the owner now.
+            try {
+                codec.releaseOutputBuffer(index, false)
+            } catch (t: Throwable) {
+                Logger.w(tag, "Failed to release output buffer: ${t.message}")
+            }
             return FrameWithCloseable(
                 buffer,
                 ptsInUs, // pts
@@ -638,13 +651,7 @@ internal constructor(
                     null
                 },
                 outputFormat,
-                onClosed = {
-                    try {
-                        codec.releaseOutputBuffer(index, false)
-                    } catch (t: Throwable) {
-                        Logger.w(tag, "Failed to release output buffer for code: ${t.message}")
-                    }
-                })
+                onClosed = { /* buffer already released above */ })
         }
 
     }
