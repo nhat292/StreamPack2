@@ -361,23 +361,26 @@ class OpenGlRenderer {
             }
 
             // ── 2. Link corner images ──
-            // Each link spans ~half the screen width (LINK_HALF_EXTENT half-extent each).
             // link1 → top-right corner.
             // link2 → bottom-left, link3 → bottom-right; both sit just above the ticker.
-            // A small horizontal inner gap (LINK_INNER_GAP) is left between link2 and link3.
             if (hasLinks) {
                 mLinkLayers.forEachIndexed { i, layer ->
                     if (layer == null) return@forEachIndexed
 
-                    val aspect = layer.widthPx.toFloat() / layer.heightPx.toFloat()
+                    // Preserve the image's original pixel aspect ratio by deriving scaleY from
+                    // scaleX in SCREEN pixels, then converting back to clip space.
+                    // scaleX (clip) = desired_display_width_px / surfaceW
+                    // scaleY (clip) = desired_display_height_px / surfaceH
+                    //               = (desired_display_width_px / imageAspect) / surfaceH
+                    //               = scaleX * surfaceW / (surfaceH * imageAspect)
+                    val imageAspect = layer.widthPx.toFloat() / layer.heightPx.toFloat()
                     val scaleX = LINK_HALF_EXTENT
-                    val scaleY = scaleX / aspect
+                    val scaleY = scaleX * surfaceW / (surfaceH * imageAspect)
 
                     val tx: Float
                     val ty: Float
                     when (i) {
                         0 -> {  // link1 — top-right corner
-                            // Right edge at 1-MARGIN, top edge at 1-MARGIN
                             tx = 1f - scaleX - LINK_EDGE_MARGIN
                             ty = 1f - scaleY - LINK_EDGE_MARGIN
                         }
@@ -1078,8 +1081,8 @@ class OpenGlRenderer {
 
         /** Pixel margin from the top-left corner for the scoreboard overlay. */
         private const val OVERLAY_MARGIN_PX = 16f
-        /** Scale factor applied to static text/score overlay layers (56% of natural pixel size). */
-        private const val OVERLAY_SCALE = 0.56f
+        /** Scale factor applied to static text/score overlay layers (67.2% of natural pixel size). */
+        private const val OVERLAY_SCALE = 0.672f
         /** Vertical position of the ticker centre in clip space (very bottom). */
         private const val TICKER_Y = -0.93f
         /** Clip-space units the ticker moves left per frame. */
