@@ -172,23 +172,19 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 val streamerRef = streamer
                 viewModelScope.launch(Dispatchers.Default) {
                     try {
-                        // Scoreboard overlay: 3 independent cached layers (text3, players, text4).
-                        val layers = TextOverlayBitmapFactory.createLayers(
+                        streamerRef.videoInput?.processor?.applyOverlayParams(
                             TextOverlayBitmapFactory.OverlayParams(
                                 text3 = "Champions League – Group A",
                                 text1 = "Real Madrid",
                                 score1 = "6", matchScore1 = "1", turn1 = "serving",
                                 text2 = "Barcelona",
                                 score2 = "4", matchScore2 = "0",
+                                tickerText = "🔥 Welcome to the Live Stream • Subscribe & Like",
+                                link1 = "https://upload.wikimedia.org/wikipedia/en/thumb/5/56/Real_Madrid_CF.svg/188px-Real_Madrid_CF.svg.png",
+                                link2 = "https://upload.wikimedia.org/wikipedia/en/thumb/4/47/FC_Barcelona_%28crest%29.svg/188px-FC_Barcelona_%28crest%29.svg.png",
+                                link3 = "https://upload.wikimedia.org/wikipedia/en/thumb/f/f5/UEFA_Champions_League.svg/188px-UEFA_Champions_League.svg.png",
                             )
                         )
-                        streamerRef.videoInput?.processor?.setOverlayBitmaps(layers)
-
-                        // Ticker (animated, scrolls right-to-left at the bottom).
-                        val ticker = TextOverlayBitmapFactory.createTickerBitmap(
-                            "🔥 Welcome to the Live Stream • Subscribe & Like"
-                        )
-                        streamerRef.videoInput?.processor?.setTickerBitmap(ticker)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to create or apply overlay bitmap", e)
                     }

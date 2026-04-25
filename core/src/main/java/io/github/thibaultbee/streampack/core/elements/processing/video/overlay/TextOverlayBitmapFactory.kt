@@ -299,7 +299,7 @@ object TextOverlayBitmapFactory {
                 if (hasScore) w += scoreColW
                 if (hasPoint) w += pointColW
                 if (hasTb) w += tbColW
-                w += PADDING + BORDER_WIDTH            // right side pad + border
+                w += BORDER_WIDTH                      // right border only — no trailing padding
                 return w.toInt()
             }
     }
@@ -567,7 +567,7 @@ object TextOverlayBitmapFactory {
         if (layout.hasPoint) scoreBlockW += layout.pointColW
         if (layout.hasTb) scoreBlockW += layout.tbColW
 
-        var cursorX = canvasWidth - BORDER_WIDTH - PADDING - scoreBlockW
+        var cursorX = canvasWidth - BORDER_WIDTH - scoreBlockW
 
         // Turn indicator — background + indicator only drawn when value is non-empty
         if (layout.hasTurn) {
