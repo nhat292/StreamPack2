@@ -317,8 +317,10 @@ class OpenGlRenderer {
         if (surfaceW <= 0f || surfaceH <= 0f) return
 
         // Ticker geometry computed once — needed for link Y positioning below.
+        // scaleX and scaleY are computed independently (bitmap px / surface px) so the ticker
+        // renders at 1:1 pixel density on the output surface, avoiding horizontal upscaling blur.
         val tickerScaleY = if (hasTicker && mTickerHeight > 0) mTickerHeight.toFloat() / surfaceH else 0f
-        val tickerScaleX = if (tickerScaleY > 0f) tickerScaleY * (mTickerWidth.toFloat() / mTickerHeight.toFloat()) else 0f
+        val tickerScaleX = if (hasTicker && mTickerWidth > 0) mTickerWidth.toFloat() / surfaceW else 0f
         // Top edge of the ticker bar in clip space.
         val tickerTopEdge = TICKER_Y + tickerScaleY
 
@@ -439,11 +441,12 @@ class OpenGlRenderer {
             val ids = IntArray(1); GLES20.glGenTextures(1, ids, 0)
             val texId = ids[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             AndroidGLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
             checkGlErrorOrThrow("texImage2D (layer $i)")
             StaticLayer(texId, bitmap.width, bitmap.height)
         }
