@@ -1077,8 +1077,8 @@ class OpenGlRenderer {
 
         /** Pixel margin from the top-left corner for the scoreboard overlay. */
         private const val OVERLAY_MARGIN_PX = 16f
-        /** Scale factor applied to static text/score overlay layers (80% of natural pixel size). */
-        private const val OVERLAY_SCALE = 0.8f
+        /** Scale factor applied to static text/score overlay layers (56% of natural pixel size). */
+        private const val OVERLAY_SCALE = 0.56f
         /** Vertical position of the ticker centre in clip space (very bottom). */
         private const val TICKER_Y = -0.93f
         /** Clip-space units the ticker moves left per frame. */
