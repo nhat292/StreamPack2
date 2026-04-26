@@ -45,9 +45,9 @@ import kotlin.math.min
 object TextOverlayBitmapFactory {
 
     // ── Layout constants ──────────────────────────────────────────────────
-    private const val TEXT_SIZE = 21f
-    private const val TEXT3_SIZE = 21f
-    private const val TEXT4_SIZE = 18f
+    private const val TEXT_SIZE = 25.2f
+    private const val TEXT3_SIZE = 25.2f
+    private const val TEXT4_SIZE = 21.6f
     private const val TICKER_SIZE = 20f
     private const val PADDING = 14f
     private const val V_PADDING = PADDING * 0.8f   // vertical-only padding (80% of PADDING)

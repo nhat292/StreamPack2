@@ -122,8 +122,12 @@ class OpenGlRenderer {
 
     // ── Link image corner overlays ───────────────────────────────────────────
     private val mPendingLinkUpdate = AtomicReference<LinkBitmaps?>(null)
-    /** Textures for the 3 corner images: [0]=top-right, [1]=bottom-left, [2]=bottom-right. */
+    /** Textures for the 3 corner images: [0]=top-right, [1]=link2 bottom, [2]=link3 bottom. */
     private val mLinkLayers: Array<StaticLayer?> = arrayOfNulls(3)
+    /** Which bottom slot (1=link2, 2=link3) is currently visible. */
+    private var mBottomLinkActiveIndex = 1
+    /** Wall-clock nanoseconds when the current bottom link started showing. */
+    private var mBottomLinkStartNs = 0L
     // ── End link image support ───────────────────────────────────────────────
 
     /**
@@ -361,45 +365,57 @@ class OpenGlRenderer {
             }
 
             // ── 2. Link corner images ──
-            // link1 → top-right corner.
-            // link2 → bottom-left, link3 → bottom-right; both sit just above the ticker.
+            // link1 (index 0) → top-right corner, always visible.
+            // link2 (index 1) / link3 (index 2) → bottom area, alternating every 20 s,
+            //   spanning full width (left-margin to right-margin) with original aspect ratio.
             if (hasLinks) {
-                mLinkLayers.forEachIndexed { i, layer ->
-                    if (layer == null) return@forEachIndexed
-
-                    // Preserve the image's original pixel aspect ratio by deriving scaleY from
-                    // scaleX in SCREEN pixels, then converting back to clip space.
-                    // scaleX (clip) = desired_display_width_px / surfaceW
-                    // scaleY (clip) = desired_display_height_px / surfaceH
-                    //               = (desired_display_width_px / imageAspect) / surfaceH
-                    //               = scaleX * surfaceW / (surfaceH * imageAspect)
-                    val imageAspect = layer.widthPx.toFloat() / layer.heightPx.toFloat()
+                // ── link1: top-right ──
+                val link1 = mLinkLayers[0]
+                if (link1 != null) {
+                    val imageAspect = link1.widthPx.toFloat() / link1.heightPx.toFloat()
                     val scaleX = LINK_HALF_EXTENT
                     val scaleY = scaleX * surfaceW / (surfaceH * imageAspect)
+                    val tx = 1f - scaleX - LINK_EDGE_MARGIN
+                    val ty = 1f - scaleY - LINK_EDGE_MARGIN
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + LINK_TEXTURE_BASE)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, link1.textureId)
+                    GLES20.glUniform1i(mOverlayTextureLoc, LINK_TEXTURE_BASE)
+                    val m = FloatArray(16); Matrix.setIdentityM(m, 0)
+                    m[0] = scaleX; m[5] = scaleY; m[12] = tx; m[13] = ty
+                    GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                }
 
-                    val tx: Float
-                    val ty: Float
-                    when (i) {
-                        0 -> {  // link1 — top-right corner
-                            tx = 1f - scaleX - LINK_EDGE_MARGIN
-                            ty = 1f - scaleY - LINK_EDGE_MARGIN
-                        }
-                        1 -> {  // link2 — bottom-left, above ticker, left edge padded
-                            tx = -1f + scaleX + LINK_EDGE_MARGIN
-                            ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
-                        }
-                        else -> {  // link3 — bottom-right, above ticker, right edge padded
-                            tx = 1f - scaleX - LINK_EDGE_MARGIN
-                            ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
-                        }
+                // ── link2/link3: full-width bottom, alternating every 20 s ──
+                val hasLink2 = mLinkLayers[1] != null
+                val hasLink3 = mLinkLayers[2] != null
+                if (hasLink2 || hasLink3) {
+                    val now = System.nanoTime()
+                    if (mBottomLinkStartNs == 0L) mBottomLinkStartNs = now
+                    // Advance slot when time expires, skipping slots with no image.
+                    if (now - mBottomLinkStartNs >= BOTTOM_LINK_DURATION_NS) {
+                        val next = if (mBottomLinkActiveIndex == 1) 2 else 1
+                        // Only switch if the target slot has an image.
+                        if (mLinkLayers[next] != null) mBottomLinkActiveIndex = next
+                        mBottomLinkStartNs = now
                     }
-
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + LINK_TEXTURE_BASE + i)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, layer.textureId)
-                    GLES20.glUniform1i(mOverlayTextureLoc, LINK_TEXTURE_BASE + i)
-
-                    val m = FloatArray(16)
-                    Matrix.setIdentityM(m, 0)
+                    // Fall back to the available slot if the active one is missing.
+                    val activeIndex = when {
+                        mLinkLayers[mBottomLinkActiveIndex] != null -> mBottomLinkActiveIndex
+                        hasLink2 -> 1
+                        else -> 2
+                    }
+                    val bottomLink = mLinkLayers[activeIndex]!!
+                    val imageAspect = bottomLink.widthPx.toFloat() / bottomLink.heightPx.toFloat()
+                    // Full width minus left+right padding.
+                    val scaleX = 1f - LINK_EDGE_MARGIN
+                    val scaleY = scaleX * surfaceW / (surfaceH * imageAspect)
+                    val tx = 0f  // centered
+                    val ty = tickerTopEdge + LINK_TICKER_GAP + scaleY
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0 + LINK_TEXTURE_BASE + activeIndex)
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bottomLink.textureId)
+                    GLES20.glUniform1i(mOverlayTextureLoc, LINK_TEXTURE_BASE + activeIndex)
+                    val m = FloatArray(16); Matrix.setIdentityM(m, 0)
                     m[0] = scaleX; m[5] = scaleY; m[12] = tx; m[13] = ty
                     GLES20.glUniformMatrix4fv(mOverlayTransMatrixLoc, 1, false, m, 0)
                     GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -526,6 +542,9 @@ class OpenGlRenderer {
                 mLinkLayers[i] = StaticLayer(texId, bitmap.width, bitmap.height)
             }
         }
+        // Reset the bottom-link timer so link2 always shows first after a new upload.
+        mBottomLinkActiveIndex = 1
+        mBottomLinkStartNs = 0L
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         activateExternalTexture(mExternalTextureId)
     }
@@ -1098,6 +1117,8 @@ class OpenGlRenderer {
         private const val LINK_TICKER_GAP = 0.02f
         /** Clip-space margin from screen edges for link1 (top-right). */
         private const val LINK_EDGE_MARGIN = 0.02f
+        /** How long (nanoseconds) each bottom link is shown before switching to the other. */
+        private const val BOTTOM_LINK_DURATION_NS = 20_000_000_000L  // 20 seconds
 
         // ── Overlay shaders ─────────────────────────────────────────────────
         /**
