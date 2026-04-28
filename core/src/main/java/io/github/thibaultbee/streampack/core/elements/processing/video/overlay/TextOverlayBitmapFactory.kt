@@ -45,13 +45,14 @@ import kotlin.math.min
 object TextOverlayBitmapFactory {
 
     // ── Layout constants ──────────────────────────────────────────────────
-    private const val TEXT_SIZE = 25.2f
-    private const val TEXT3_SIZE = 25.2f
-    private const val TEXT4_SIZE = 21.6f
+    private const val TEXT_SIZE = 30.24f
+    private const val TEXT3_SIZE = 22.68f
+    private const val TEXT4_SIZE = 25.92f
     private const val TICKER_SIZE = 20f
     private const val PADDING = 14f
     private const val V_PADDING = PADDING * 0.8f   // vertical-only padding (80% of PADDING)
     private const val BORDER_WIDTH = 1f
+    private const val NAME_SCORE_GAP = 24f         // extra space between player name and score columns
 
     // Colours
     private val COLOR_PLAYER_BG = Color.parseColor("#146094")
@@ -293,7 +294,7 @@ object TextOverlayBitmapFactory {
          */
         val rowWidth: Int
             get() {
-                var w = BORDER_WIDTH + PADDING + nameColW
+                var w = BORDER_WIDTH + PADDING + nameColW + NAME_SCORE_GAP
                 if (hasTurn) w += PADDING + turnColW   // PADDING = leading pad before turn
                 if (hasMatchScore) w += matchScoreColW
                 if (hasScore) w += scoreColW
