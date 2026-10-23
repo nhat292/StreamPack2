@@ -74,8 +74,33 @@ class RtmpEndpoint internal constructor(
     private var startUpTimestamp = INVALID_TIMESTAMP
     private val timestampMutex = Mutex()
 
+    // Best-effort transmission stats derived from the per-frame write path
+    // below — there's no RTT/retransmit-count equivalent available for a
+    // plain RTMP/TCP socket (unlike SRT's native stats), but a write
+    // that's taking much longer than normal, or recent write failures/
+    // timeouts, both indicate the socket can't keep up with the current
+    // bitrate. Enough to drive a BitrateRegulator (see RtmpAdaptiveBitrateRegulator).
+    // Volatile: written only by the single coroutine consuming
+    // [flvTagChannel] in write(FLVTag), read from whichever coroutine polls
+    // [metrics] (a BitrateRegulatorController, on its own schedule) — losing
+    // or double-counting one sample under a race is harmless for that
+    // purpose, so a Mutex isn't needed here.
+    @Volatile
+    private var lastWriteLatencyMs: Long = 0L
+    @Volatile
+    private var recentWriteCount: Int = 0
+    @Volatile
+    private var recentWriteFailures: Int = 0
+    private var metricsWindowStartMs: Long = System.currentTimeMillis()
+    private var windowWriteCount: Int = 0
+    private var windowWriteFailures: Int = 0
+
     override val metrics: Any
-        get() = TODO("Not yet implemented")
+        get() = RtmpEndpointMetrics(
+            lastWriteLatencyMs = lastWriteLatencyMs,
+            recentWriteCount = recentWriteCount,
+            recentWriteFailures = recentWriteFailures,
+        )
 
     private val _isOpenFlow = MutableStateFlow(false)
     override val isOpenFlow = _isOpenFlow.asStateFlow()
@@ -146,20 +171,45 @@ class RtmpEndpoint internal constructor(
     }
 
     private suspend fun write(flvTag: FLVTag) {
+        val writeStartMs = System.currentTimeMillis()
+        var failed = false
         try {
             safeClient { rtmpClient ->
                 rtmpClient.write(flvTag)
             }
         } catch (_: TimeoutCancellationException) {
             Logger.w(TAG, "Frame dropped due to timeout")
+            failed = true
         } catch (t: Throwable) {
             Logger.w(TAG, "Error while writing FLV data: $t")
             // Socket is closed automatically on error
+            failed = true
         }
+        recordWriteMetric(System.currentTimeMillis() - writeStartMs, failed)
         try {
             flvTag.data.close()
         } catch (t: Throwable) {
             Logger.e(TAG, "Error while closing FLVTag data: $t")
+        }
+    }
+
+    /**
+     * Updates the best-effort [metrics] snapshot. See the fields' own
+     * comments for why this isn't behind [mutex].
+     */
+    private fun recordWriteMetric(latencyMs: Long, failed: Boolean) {
+        lastWriteLatencyMs = latencyMs
+        windowWriteCount++
+        if (failed) {
+            windowWriteFailures++
+        }
+        val now = System.currentTimeMillis()
+        if (now - metricsWindowStartMs >= METRICS_WINDOW_MS) {
+            recentWriteCount = windowWriteCount
+            recentWriteFailures = windowWriteFailures
+            windowWriteCount = 0
+            windowWriteFailures = 0
+            metricsWindowStartMs = now
         }
     }
 
@@ -228,11 +278,26 @@ class RtmpEndpoint internal constructor(
 
         private const val INVALID_TIMESTAMP = -1L
 
+        private const val METRICS_WINDOW_MS = 5_000L
+
         init {
             System.setProperty("kotlinx.io.pool.size.bytes", "4194304") // 4MB
         }
     }
 }
+
+/**
+ * Best-effort [RtmpEndpoint] transmission stats, exposed via [RtmpEndpoint.metrics].
+ *
+ * @param lastWriteLatencyMs how long the most recent frame write took, in milliseconds.
+ * @param recentWriteCount writes attempted in the last ~5s window.
+ * @param recentWriteFailures of [recentWriteCount], how many failed or timed out.
+ */
+data class RtmpEndpointMetrics(
+    val lastWriteLatencyMs: Long,
+    val recentWriteCount: Int,
+    val recentWriteFailures: Int,
+)
 
 /**
  * A factory to build a [RtmpEndpoint].
