@@ -608,6 +608,11 @@ internal class EncodingPipelineOutput(
 
             streamEventListener?.onStartStream()
 
+            // Before the encoders: RTMP sends each stream's sequence header only once, with its
+            // first frame. A frame encoded while the endpoint is still publishing can be lost,
+            // and without that header the server can never decode the stream.
+            endpointInternal.startStream()
+
             val audioEncoderJob = audioEncoderInternal?.let {
                 coroutineScope.launch {
                     it.startStream()
@@ -622,8 +627,6 @@ internal class EncodingPipelineOutput(
 
             audioEncoderJob?.join()
             videoEncoderJob?.join()
-
-            endpointInternal.startStream()
 
             bitrateRegulatorController?.start()
         } catch (t: Throwable) {
