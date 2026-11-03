@@ -45,6 +45,13 @@ open class DualEndpoint(
     coroutineDispatcher
 ) {
     /**
+     * The [mainEndpoint]'s metrics, so a bitrate regulator on a pipeline output using this
+     * endpoint follows the main (e.g. live) connection.
+     */
+    override val metrics: Any
+        get() = mainEndpoint.metrics
+
+    /**
      * Opens the [mainEndpoint].
      *
      * You must open the [secondEndpoint] manually.

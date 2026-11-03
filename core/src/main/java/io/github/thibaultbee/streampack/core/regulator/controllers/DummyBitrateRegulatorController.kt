@@ -19,10 +19,12 @@ import io.github.thibaultbee.streampack.core.configuration.BitrateRegulatorConfi
 import io.github.thibaultbee.streampack.core.elements.encoders.IEncoder
 import io.github.thibaultbee.streampack.core.elements.endpoints.IEndpoint
 import io.github.thibaultbee.streampack.core.elements.utils.CoroutineScheduler
+import io.github.thibaultbee.streampack.core.logger.Logger
 import io.github.thibaultbee.streampack.core.pipelines.outputs.encoding.IConfigurableAudioEncodingPipelineOutput
 import io.github.thibaultbee.streampack.core.pipelines.outputs.encoding.IConfigurableVideoEncodingPipelineOutput
 import io.github.thibaultbee.streampack.core.pipelines.outputs.encoding.IEncodingPipelineOutput
 import io.github.thibaultbee.streampack.core.regulator.IBitrateRegulator
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 
 /**
@@ -65,11 +67,18 @@ open class DummyBitrateRegulatorController(
      * Scheduler for bitrate regulation
      */
     private val scheduler = CoroutineScheduler(delayTimeInMs, coroutineDispatcher) {
-        bitrateRegulator.update(
-            endpoint.metrics,
-            videoEncoder.bitrate,
-            audioEncoder?.bitrate ?: 0
-        )
+        // This scope has no exception handler: anything thrown here kills the app.
+        try {
+            bitrateRegulator.update(
+                endpoint.metrics,
+                videoEncoder.bitrate,
+                audioEncoder?.bitrate ?: 0
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Logger.w(TAG, "Skipping bitrate regulation: $t")
+        }
     }
 
     override fun start() {
@@ -78,6 +87,10 @@ open class DummyBitrateRegulatorController(
 
     override fun stop() {
         scheduler.stop()
+    }
+
+    private companion object {
+        private const val TAG = "DummyBitrateRegulatorController"
     }
 
     class Factory(
